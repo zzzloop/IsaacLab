@@ -62,6 +62,7 @@ parser.add_argument(
 parser.add_argument("--left_ee_body", type=str, default="LinearclampinggripperJZ02_Link")
 parser.add_argument("--right_ee_body", type=str, default="LinearclampinggripperJZ01_Link")
 parser.add_argument("--goal_hold_steps", type=int, default=180, help="Simulation steps to hold each IK target.")
+parser.add_argument("--no_task_scene", action="store_true", help="Spawn only ground/light/robot; skip table, bucket, and cubes.")
 parser.add_argument("--print_only", action="store_true", help="Only print names and validation results; do not run IK.")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
@@ -183,13 +184,111 @@ def _make_robot_cfg() -> ArticulationCfg:
     )
 
 
+def _make_material(color: tuple[float, float, float], roughness: float = 0.7) -> sim_utils.PreviewSurfaceCfg:
+    return sim_utils.PreviewSurfaceCfg(diffuse_color=color, roughness=roughness)
+
+
+def _spawn_static_cuboid(
+    prim_path: str,
+    size: tuple[float, float, float],
+    translation: tuple[float, float, float],
+    color: tuple[float, float, float],
+) -> None:
+    cfg = sim_utils.CuboidCfg(
+        size=size,
+        collision_props=sim_utils.CollisionPropertiesCfg(),
+        visual_material=_make_material(color),
+    )
+    cfg.func(prim_path, cfg, translation=translation)
+
+
+def _spawn_rigid_cube(
+    prim_path: str,
+    size: float,
+    translation: tuple[float, float, float],
+    color: tuple[float, float, float],
+) -> None:
+    cfg = sim_utils.CuboidCfg(
+        size=(size, size, size),
+        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+            solver_position_iteration_count=8,
+            solver_velocity_iteration_count=0,
+            max_depenetration_velocity=1.0,
+        ),
+        mass_props=sim_utils.MassPropertiesCfg(mass=0.05),
+        collision_props=sim_utils.CollisionPropertiesCfg(),
+        physics_material=sim_utils.RigidBodyMaterialCfg(static_friction=0.8, dynamic_friction=0.6, restitution=0.0),
+        visual_material=_make_material(color),
+    )
+    cfg.func(prim_path, cfg, translation=translation)
+
+
+def _spawn_bucket(prefix: str, center: tuple[float, float, float]) -> None:
+    """Spawn a simple open-top bucket using five static cuboids."""
+    x, y, table_z = center
+    wall_thickness = 0.018
+    outer = 0.20
+    height = 0.16
+    bottom_thickness = 0.018
+    base_z = table_z + bottom_thickness * 0.5
+    wall_z = table_z + bottom_thickness + height * 0.5
+    bucket_color = (0.95, 0.72, 0.18)
+
+    _spawn_static_cuboid(f"{prefix}/Bottom", (outer, outer, bottom_thickness), (x, y, base_z), bucket_color)
+    _spawn_static_cuboid(f"{prefix}/WallPosX", (wall_thickness, outer, height), (x + outer * 0.5, y, wall_z), bucket_color)
+    _spawn_static_cuboid(f"{prefix}/WallNegX", (wall_thickness, outer, height), (x - outer * 0.5, y, wall_z), bucket_color)
+    _spawn_static_cuboid(f"{prefix}/WallPosY", (outer, wall_thickness, height), (x, y + outer * 0.5, wall_z), bucket_color)
+    _spawn_static_cuboid(f"{prefix}/WallNegY", (outer, wall_thickness, height), (x, y - outer * 0.5, wall_z), bucket_color)
+
+
+def _spawn_pick_place_scene() -> None:
+    """Spawn a simple table-top scene: table, bucket, and two graspable cubes."""
+    sim_utils.create_prim("/World/TaskScene", "Xform")
+
+    table_center_x = 0.72
+    table_center_y = 0.0
+    table_top_z = 0.46
+    tabletop_thickness = 0.055
+    tabletop_center_z = table_top_z - tabletop_thickness * 0.5
+
+    _spawn_static_cuboid(
+        "/World/TaskScene/TableTop",
+        (0.78, 0.72, tabletop_thickness),
+        (table_center_x, table_center_y, tabletop_center_z),
+        (0.48, 0.42, 0.34),
+    )
+    for name, dx, dy in [
+        ("LegFL", 0.31, 0.27),
+        ("LegFR", 0.31, -0.27),
+        ("LegBL", -0.31, 0.27),
+        ("LegBR", -0.31, -0.27),
+    ]:
+        _spawn_static_cuboid(
+            f"/World/TaskScene/{name}",
+            (0.045, 0.045, table_top_z),
+            (table_center_x + dx, table_center_y + dy, table_top_z * 0.5),
+            (0.34, 0.30, 0.25),
+        )
+
+    _spawn_bucket("/World/TaskScene/Bucket", (0.82, 0.0, table_top_z))
+    cube_size = 0.06
+    cube_z = table_top_z + cube_size * 0.5 + 0.003
+    _spawn_rigid_cube("/World/TaskScene/BlockRed", cube_size, (0.56, 0.16, cube_z), (0.9, 0.12, 0.08))
+    _spawn_rigid_cube("/World/TaskScene/BlockBlue", cube_size, (0.56, -0.16, cube_z), (0.08, 0.22, 0.9))
+
+    print("[BRX] Spawned task scene: table, open-top bucket, and two rigid cubes.")
+
+
 def _spawn_minimal_scene() -> None:
-    """Create only the scene objects needed for a first IK import/control check."""
+    """Create the scene objects needed for IK and task-scene checks."""
     ground_cfg = sim_utils.GroundPlaneCfg()
     ground_cfg.func("/World/defaultGroundPlane", ground_cfg)
 
     light_cfg = sim_utils.DomeLightCfg(intensity=3000.0, color=(0.9, 0.9, 0.9))
     light_cfg.func("/World/Light", light_cfg)
+
+    if not args_cli.no_task_scene:
+        _spawn_pick_place_scene()
 
 
 def _converted_usd_path() -> str:
