@@ -2,19 +2,21 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 """
-BRX dual-arm Differential IK smoke test for Isaac Lab.
+BRX URDF -> Isaac Lab Differential IK smoke test.
 
-This script loads a full scene USD that already contains the BRX robot articulation,
-prints the resolved joint/body names, checks the names used by the X-VLA FK pipeline,
-and drives left/right end-effector bodies through small absolute pose targets.
+This script does not assume that you already have a clean robot USD or a complete
+scene USD. It imports the BRX robot directly from URDF, spawns a minimal Isaac Lab
+scene, prints the resolved joint/body names, checks the names used by the X-VLA FK
+adapter, and drives the left/right end-effectors through small absolute pose targets.
 
-Usage example:
+Usage examples:
+
+    ./isaaclab.sh -p scripts/custom/brx_ik_smoke.py --print_only
 
     ./isaaclab.sh -p scripts/custom/brx_ik_smoke.py \
-        --scene_usd /path/to/scene.usd \
-        --robot_prim /World/Robot
+        --urdf_path /home/kemove/zzk_data/IsaacLab/BRXURDF0401.urdf
 
-The first stage intentionally does not call X-VLA. It verifies that the USD,
+The first stage intentionally does not call X-VLA. It verifies that the URDF import,
 articulation, body names, joint names, Jacobians, and Differential IK control path
 are usable before policy integration.
 """
@@ -22,18 +24,35 @@ are usable before policy integration.
 from __future__ import annotations
 
 import argparse
+import os
 from dataclasses import dataclass
 
 from isaaclab.app import AppLauncher
 
 
-parser = argparse.ArgumentParser(description="BRX dual-arm Differential IK smoke test.")
-parser.add_argument("--scene_usd", type=str, required=True, help="Path to the complete scene USD.")
+parser = argparse.ArgumentParser(description="BRX URDF Differential IK smoke test.")
+parser.add_argument(
+    "--urdf_path",
+    type=str,
+    default="/home/kemove/zzk_data/IsaacLab/BRXURDF0401.urdf",
+    help="Path to BRXURDF0401.urdf. The URDF mesh paths must be valid from this file.",
+)
+parser.add_argument(
+    "--usd_dir",
+    type=str,
+    default=None,
+    help="Directory where Isaac Lab writes the converted USD. Defaults to <urdf_dir>/isaaclab_converted.",
+)
+parser.add_argument(
+    "--force_usd_conversion",
+    action="store_true",
+    help="Force URDF -> USD conversion even if a converted USD already exists.",
+)
 parser.add_argument(
     "--robot_prim",
     type=str,
     default="/World/Robot",
-    help="Prim path of the robot articulation inside the loaded scene USD.",
+    help="Prim path where the imported robot articulation is spawned.",
 )
 parser.add_argument("--left_ee_body", type=str, default="LinearclampinggripperJZ02_Link")
 parser.add_argument("--right_ee_body", type=str, default="LinearclampinggripperJZ01_Link")
@@ -56,10 +75,12 @@ from isaaclab.markers import VisualizationMarkers
 from isaaclab.markers.config import FRAME_MARKER_CFG
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sim import SimulationContext
-from isaaclab.utils.math import subtract_frame_transforms
+from isaaclab.sim.converters import UrdfConverterCfg
+from isaaclab.utils.assets import check_file_path
+from isaaclab.utils.math import combine_frame_transforms, subtract_frame_transforms
 
 
-# This order is the assumption used by the X-VLA custom_handler.py FK adapter.
+# This is the same movable-joint order assumed by the X-VLA custom_handler.py FK adapter.
 EXPECTED_MOVABLE_JOINTS = [
     "FoldingModularJoint02_Joint",
     "FoldingModularJoint03_Joint",
@@ -102,11 +123,46 @@ class ArmIkContext:
     marker_goal: VisualizationMarkers
 
 
+def _abs_path(path: str) -> str:
+    return os.path.abspath(os.path.expanduser(path))
+
+
 def _make_robot_cfg() -> ArticulationCfg:
-    """Wrap an existing USD robot articulation at args_cli.robot_prim."""
+    """Import BRX from URDF and wrap it as an Isaac Lab articulation."""
+    urdf_path = _abs_path(args_cli.urdf_path)
+    if not check_file_path(urdf_path):
+        raise FileNotFoundError(f"URDF path does not exist or is not readable: {urdf_path}")
+
+    usd_dir = _abs_path(args_cli.usd_dir) if args_cli.usd_dir else os.path.join(os.path.dirname(urdf_path), "isaaclab_converted")
+
     return ArticulationCfg(
         prim_path=args_cli.robot_prim,
-        spawn=None,
+        spawn=sim_utils.UrdfFileCfg(
+            asset_path=urdf_path,
+            usd_dir=usd_dir,
+            usd_file_name="brx_imported.usd",
+            force_usd_conversion=args_cli.force_usd_conversion,
+            fix_base=True,
+            # Keep fixed-joint child links so EE body names from training FK stay available.
+            merge_fixed_joints=False,
+            self_collision=False,
+            collision_from_visuals=False,
+            joint_drive=UrdfConverterCfg.JointDriveCfg(
+                gains=UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=800.0, damping=40.0),
+                target_type="position",
+                drive_type="force",
+            ),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                disable_gravity=False,
+                max_depenetration_velocity=5.0,
+            ),
+            articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+                enabled_self_collisions=False,
+                solver_position_iteration_count=8,
+                solver_velocity_iteration_count=0,
+            ),
+        ),
+        init_state=ArticulationCfg.InitialStateCfg(pos=(0.0, 0.0, 0.0)),
         actuators={
             "all_joints": ImplicitActuatorCfg(
                 joint_names_expr=[".*"],
@@ -119,15 +175,21 @@ def _make_robot_cfg() -> ArticulationCfg:
     )
 
 
-def _load_scene_usd() -> None:
-    """Load the full scene USD into /World."""
-    cfg = sim_utils.UsdFileCfg(usd_path=args_cli.scene_usd)
-    cfg.func("/World", cfg)
+def _spawn_minimal_scene() -> None:
+    """Create only the scene objects needed for a first IK import/control check."""
+    ground_cfg = sim_utils.GroundPlaneCfg()
+    ground_cfg.func("/World/defaultGroundPlane", ground_cfg)
+
+    light_cfg = sim_utils.DomeLightCfg(intensity=3000.0, color=(0.9, 0.9, 0.9))
+    light_cfg.func("/World/Light", light_cfg)
 
 
 def _print_validation(robot: Articulation) -> None:
-    print("\n[BRX] Resolved robot names")
+    print("\n[BRX] URDF import input")
+    print("[BRX] urdf_path:", _abs_path(args_cli.urdf_path))
     print("[BRX] robot prim:", args_cli.robot_prim)
+
+    print("\n[BRX] Resolved robot names")
     print("[BRX] joint count:", len(robot.joint_names))
     for idx, name in enumerate(robot.joint_names):
         print(f"  joint[{idx:02d}] {name}")
@@ -177,7 +239,6 @@ def _resolve_arm(
     goal_offsets: list[list[float]],
 ) -> ArmIkContext:
     entity_cfg = SceneEntityCfg("robot", joint_names=joint_names, body_names=[ee_body_name])
-    # Use a tiny shim object with the same interface SceneEntityCfg.resolve expects.
     scene_map = {"robot": robot}
     entity_cfg.resolve(scene_map)
 
@@ -288,13 +349,17 @@ def run_simulator(sim: SimulationContext, robot: Articulation) -> None:
         left_pose_w = robot.data.body_state_w[:, left_ctx.entity_cfg.body_ids[0], 0:7]
         right_pose_w = robot.data.body_state_w[:, right_ctx.entity_cfg.body_ids[0], 0:7]
         root_pose_w = robot.data.root_pose_w
-        left_goal_pos_w = left_ctx.goals_b[goal_idx : goal_idx + 1, 0:3] + root_pose_w[:, 0:3]
-        right_goal_pos_w = right_ctx.goals_b[goal_idx : goal_idx + 1, 0:3] + root_pose_w[:, 0:3]
+        left_goal_pos_w, left_goal_quat_w = combine_frame_transforms(
+            root_pose_w[:, 0:3], root_pose_w[:, 3:7], left_ctx.goals_b[goal_idx : goal_idx + 1, 0:3], left_ctx.goals_b[goal_idx : goal_idx + 1, 3:7]
+        )
+        right_goal_pos_w, right_goal_quat_w = combine_frame_transforms(
+            root_pose_w[:, 0:3], root_pose_w[:, 3:7], right_ctx.goals_b[goal_idx : goal_idx + 1, 0:3], right_ctx.goals_b[goal_idx : goal_idx + 1, 3:7]
+        )
 
         left_ctx.marker_current.visualize(left_pose_w[:, 0:3], left_pose_w[:, 3:7])
         right_ctx.marker_current.visualize(right_pose_w[:, 0:3], right_pose_w[:, 3:7])
-        left_ctx.marker_goal.visualize(left_goal_pos_w, left_ctx.goals_b[goal_idx : goal_idx + 1, 3:7])
-        right_ctx.marker_goal.visualize(right_goal_pos_w, right_ctx.goals_b[goal_idx : goal_idx + 1, 3:7])
+        left_ctx.marker_goal.visualize(left_goal_pos_w, left_goal_quat_w)
+        right_ctx.marker_goal.visualize(right_goal_pos_w, right_goal_quat_w)
 
 
 def main() -> None:
@@ -302,7 +367,7 @@ def main() -> None:
     sim = SimulationContext(sim_cfg)
     sim.set_camera_view([2.5, -2.5, 2.0], [0.0, 0.0, 0.8])
 
-    _load_scene_usd()
+    _spawn_minimal_scene()
     robot = Articulation(cfg=_make_robot_cfg())
 
     sim.reset()
