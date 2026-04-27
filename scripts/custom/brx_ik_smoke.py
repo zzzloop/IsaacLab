@@ -223,6 +223,34 @@ def _spawn_rigid_cube(
     cfg.func(prim_path, cfg, translation=translation)
 
 
+
+def _spawn_floor_visuals() -> None:
+    """Add a clean lab-style tile overlay above the physics ground plane."""
+    sim_utils.create_prim("/World/FloorVisuals", "Xform")
+    floor_cfg = sim_utils.CuboidCfg(
+        size=(4.0, 4.0, 0.004),
+        visual_material=_make_material((0.72, 0.76, 0.76), roughness=0.9),
+    )
+    floor_cfg.func("/World/FloorVisuals/Base", floor_cfg, translation=(0.35, 0.0, -0.003))
+
+    line_color = (0.50, 0.55, 0.55)
+    line_width = 0.006
+    line_height = 0.002
+    extent = 4.0
+    spacing = 0.25
+    for idx in range(-8, 9):
+        offset = idx * spacing
+        line_x_cfg = sim_utils.CuboidCfg(
+            size=(line_width, extent, line_height),
+            visual_material=_make_material(line_color, roughness=0.95),
+        )
+        line_x_cfg.func(f"/World/FloorVisuals/GridX_{idx + 8:02d}", line_x_cfg, translation=(0.35 + offset, 0.0, 0.001))
+
+        line_y_cfg = sim_utils.CuboidCfg(
+            size=(extent, line_width, line_height),
+            visual_material=_make_material(line_color, roughness=0.95),
+        )
+        line_y_cfg.func(f"/World/FloorVisuals/GridY_{idx + 8:02d}", line_y_cfg, translation=(0.35, offset, 0.001))
 def _spawn_bucket(prefix: str, center: tuple[float, float, float]) -> None:
     """Spawn a simple open-top bucket using five static cuboids."""
     x, y, table_z = center
@@ -281,8 +309,13 @@ def _spawn_pick_place_scene() -> None:
 
 def _spawn_minimal_scene() -> None:
     """Create the scene objects needed for IK and task-scene checks."""
-    ground_cfg = sim_utils.GroundPlaneCfg()
+    ground_cfg = sim_utils.GroundPlaneCfg(
+        color=(0.72, 0.76, 0.76),
+        size=(8.0, 8.0),
+        physics_material=sim_utils.RigidBodyMaterialCfg(static_friction=1.0, dynamic_friction=0.9, restitution=0.0),
+    )
     ground_cfg.func("/World/defaultGroundPlane", ground_cfg)
+    _spawn_floor_visuals()
 
     light_cfg = sim_utils.DomeLightCfg(intensity=3000.0, color=(0.9, 0.9, 0.9))
     light_cfg.func("/World/Light", light_cfg)
