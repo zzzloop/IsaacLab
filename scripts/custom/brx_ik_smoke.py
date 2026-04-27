@@ -49,6 +49,11 @@ parser.add_argument(
     help="Force URDF -> USD conversion even if a converted USD already exists.",
 )
 parser.add_argument(
+    "--no_instanceable",
+    action="store_true",
+    help="Disable instanceable USD generation. Useful when debugging invisible imported meshes.",
+)
+parser.add_argument(
     "--robot_prim",
     type=str,
     default="/World/Robot",
@@ -76,8 +81,10 @@ from isaaclab.markers.config import FRAME_MARKER_CFG
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sim import SimulationContext
 from isaaclab.sim.converters import UrdfConverterCfg
+from isaaclab.sim.utils import get_current_stage
 from isaaclab.utils.assets import check_file_path
 from isaaclab.utils.math import combine_frame_transforms, subtract_frame_transforms
+from pxr import Usd, UsdGeom
 
 
 # This is the same movable-joint order assumed by the X-VLA custom_handler.py FK adapter.
@@ -142,6 +149,7 @@ def _make_robot_cfg() -> ArticulationCfg:
             usd_dir=usd_dir,
             usd_file_name="brx_imported.usd",
             force_usd_conversion=args_cli.force_usd_conversion,
+            make_instanceable=not args_cli.no_instanceable,
             fix_base=True,
             # Keep fixed-joint child links so EE body names from training FK stay available.
             merge_fixed_joints=False,
@@ -183,6 +191,68 @@ def _spawn_minimal_scene() -> None:
     light_cfg = sim_utils.DomeLightCfg(intensity=3000.0, color=(0.9, 0.9, 0.9))
     light_cfg.func("/World/Light", light_cfg)
 
+
+def _converted_usd_path() -> str:
+    urdf_path = _abs_path(args_cli.urdf_path)
+    usd_dir = _abs_path(args_cli.usd_dir) if args_cli.usd_dir else os.path.join(os.path.dirname(urdf_path), "isaaclab_converted")
+    return os.path.join(usd_dir, "brx_imported.usd")
+
+
+def _print_stage_visual_summary() -> None:
+    """Print whether visual mesh prims exist under the spawned robot prim."""
+    stage = get_current_stage()
+    robot_prim = stage.GetPrimAtPath(args_cli.robot_prim)
+    if not robot_prim.IsValid():
+        print(f"[BRX] robot prim is not valid on stage: {args_cli.robot_prim}")
+        return
+
+    mesh_paths = []
+    imageable_paths = []
+    for prim in Usd.PrimRange(robot_prim):
+        if prim.IsA(UsdGeom.Mesh):
+            mesh_paths.append(str(prim.GetPath()))
+        if prim.IsA(UsdGeom.Imageable):
+            imageable_paths.append(str(prim.GetPath()))
+
+    print("\n[BRX] Stage visual summary")
+    print("[BRX] converted USD path:", _converted_usd_path())
+    print("[BRX] mesh prim count under robot:", len(mesh_paths))
+    print("[BRX] imageable prim count under robot:", len(imageable_paths))
+    for path in mesh_paths[:20]:
+        print("  mesh:", path)
+    if len(mesh_paths) > 20:
+        print(f"  ... {len(mesh_paths) - 20} more mesh prims")
+    if not mesh_paths:
+        print("[BRX] No Mesh prims were found under the robot. The articulation can exist while visuals are missing.")
+        print("[BRX] Check that the URDF folder contains meshes/*.STL and rerun with --force_usd_conversion --no_instanceable.")
+
+
+def _print_body_pose_summary(robot: Articulation) -> None:
+    body_pos_w = robot.data.body_state_w[0, :, 0:3]
+    mins = torch.min(body_pos_w, dim=0).values
+    maxs = torch.max(body_pos_w, dim=0).values
+    root = robot.data.root_pose_w[0]
+
+    print("\n[BRX] Body pose summary")
+    print("[BRX] root xyz:", root[0:3].detach().cpu().tolist())
+    print("[BRX] body xyz min:", mins.detach().cpu().tolist())
+    print("[BRX] body xyz max:", maxs.detach().cpu().tolist())
+    for idx, name in enumerate(robot.body_names[:20]):
+        print(f"  body_pos[{idx:02d}] {name}: {body_pos_w[idx].detach().cpu().tolist()}")
+    if len(robot.body_names) > 20:
+        print(f"  ... {len(robot.body_names) - 20} more bodies")
+
+
+def _set_camera_to_robot(sim: SimulationContext, robot: Articulation) -> None:
+    body_pos_w = robot.data.body_state_w[0, :, 0:3]
+    mins = torch.min(body_pos_w, dim=0).values
+    maxs = torch.max(body_pos_w, dim=0).values
+    center = 0.5 * (mins + maxs)
+    span = torch.clamp(maxs - mins, min=0.25)
+    distance = float(torch.max(span).detach().cpu()) * 2.5
+    distance = max(distance, 1.5)
+    eye = center + torch.tensor([distance, -distance, distance * 0.7], device=body_pos_w.device, dtype=body_pos_w.dtype)
+    sim.set_camera_view(eye.detach().cpu().tolist(), center.detach().cpu().tolist())
 
 def _print_validation(robot: Articulation) -> None:
     print("\n[BRX] URDF import input")
@@ -304,6 +374,9 @@ def run_simulator(sim: SimulationContext, robot: Articulation) -> None:
     robot.update(sim_dt)
 
     _print_validation(robot)
+    _print_stage_visual_summary()
+    _print_body_pose_summary(robot)
+    _set_camera_to_robot(sim, robot)
     if args_cli.print_only:
         return
 
