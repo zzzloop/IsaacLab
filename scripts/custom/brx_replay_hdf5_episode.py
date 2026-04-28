@@ -252,6 +252,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--urdf_path", required=True, help="Path to BRXURDF0401.urdf")
     parser.add_argument("--server", default="http://127.0.0.1:8765", help="BRX control server base URL")
     parser.add_argument("--dataset", choices=["action", "qpos"], default="action", help="Replay /action or /observations/qpos")
+    parser.add_argument("--control_mode", choices=["ee6d", "joint23"], default="ee6d", help="ee6d uses FK+IK; joint23 sends 23-D joint targets directly")
     parser.add_argument("--start", type=int, default=0, help="Start frame, inclusive")
     parser.add_argument("--end", type=int, default=None, help="End frame, exclusive")
     parser.add_argument("--stride", type=int, default=1, help="Frame stride")
@@ -276,6 +277,7 @@ def main() -> None:
     print(f"[replay] urdf: {args.urdf_path}")
     print(f"[replay] server: {args.server}")
     print(f"[replay] dataset: {args.dataset}")
+    print(f"[replay] control_mode: {args.control_mode}")
 
     fk = SimpleURDFFK(args.urdf_path)
     print(f"[replay] URDF movable joints: {len(fk.movable_joint_names)}")
@@ -306,6 +308,16 @@ def main() -> None:
     ee6d = joint23_to_ee6d(q, fk, config)
     print_summary("converted ee6d", ee6d)
 
+    if args.control_mode == "joint23":
+        command_rows = q.astype(np.float32)
+        endpoint = args.server.rstrip("/") + "/command/joint23"
+        print("[replay] joint23 mode bypasses FK and IK. This is the A/B check for data order, units, and URDF joint semantics.")
+        print(f"[replay] joint23 first row: {np.round(command_rows[0], 4).tolist()}")
+        print(f"[replay] joint23 last row: {np.round(command_rows[-1], 4).tolist()}")
+    else:
+        command_rows = ee6d
+        endpoint = args.server.rstrip("/") + "/command/ee6d"
+
     if args.dry_run:
         print("[replay] dry_run=True, not sending commands.")
         return
@@ -317,16 +329,15 @@ def main() -> None:
         reply = post_json(args.server.rstrip("/") + "/command/stop", {})
         print(f"[replay] stop_first reply: {reply}")
 
-    endpoint = args.server.rstrip("/") + "/command/ee6d"
     if args.chunk_size == 0:
-        reply = post_json(endpoint, {"action": ee6d.tolist()})
+        reply = post_json(endpoint, {"action": command_rows.tolist()})
         print(f"[replay] sent all rows: {reply}")
         return
 
-    total = ee6d.shape[0]
+    total = command_rows.shape[0]
     for start in range(0, total, args.chunk_size):
         end = min(start + args.chunk_size, total)
-        reply = post_json(endpoint, {"action": ee6d[start:end].tolist()})
+        reply = post_json(endpoint, {"action": command_rows[start:end].tolist()})
         print(f"[replay] sent rows {start}:{end}: {reply}")
         if end < total:
             time.sleep(args.sleep)
