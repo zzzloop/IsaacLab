@@ -263,6 +263,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry_run", action="store_true", help="Only load and convert; do not send commands")
     parser.add_argument("--stop_first", action="store_true", help="Send /command/stop before replay")
     parser.add_argument("--warmup_qpos0", type=int, default=0, help="Before replaying, send observations/qpos[0] to /command/joint23 this many times")
+    parser.add_argument("--reset_qpos0", action="store_true", help="Before replaying, directly write observations/qpos[0] into the simulator via /command/reset_joint23")
+    parser.add_argument("--reset_only", action="store_true", help="Only reset simulator to observations/qpos[0], then exit")
     parser.add_argument("--print_joint_table", action="store_true", help="Print per-joint first/last/min/max for the selected 23-D rows")
     parser.add_argument("--gripper_units", choices=["meters", "normalized"], default="meters", help="Server expects meters. Use normalized only for debugging raw training targets.")
     parser.add_argument("--gripper_max_m", type=float, default=DEFAULT_GRIPPER_MAX_M, help="Jaw command for fully open gripper in meters")
@@ -337,11 +339,26 @@ def main() -> None:
         reply = post_json(args.server.rstrip("/") + "/command/stop", {})
         print(f"[replay] stop_first reply: {reply}")
 
-    if args.warmup_qpos0 > 0:
+    if args.reset_qpos0 or args.reset_only or args.warmup_qpos0 > 0:
         with h5py.File(args.hdf5, "r") as f:
             if "observations/qpos" not in f:
-                raise KeyError("--warmup_qpos0 requires observations/qpos in the HDF5 file")
+                raise KeyError("qpos0 reset/warmup requires observations/qpos in the HDF5 file")
             qpos0 = np.asarray(f["observations/qpos"][0], dtype=np.float32)
+
+    if args.reset_qpos0 or args.reset_only:
+        reply = post_json(args.server.rstrip("/") + "/command/reset_joint23", {"qpos": qpos0.tolist()})
+        print(f"[replay] reset qpos0 reply: {reply}")
+        time.sleep(0.5)
+        try:
+            state_after_reset = get_json(args.server.rstrip("/") + "/state")
+            print(f"[replay] state after reset mode: {state_after_reset.get('mode')}")
+            print(f"[replay] state qpos23 head joints: {state_after_reset.get('qpos23', [None] * 23)[21:23]}")
+        except Exception as exc:
+            print(f"[replay] could not read state after reset: {exc}")
+        if args.reset_only:
+            return
+
+    if args.warmup_qpos0 > 0:
         warmup_rows = np.repeat(qpos0[None, :], args.warmup_qpos0, axis=0)
         reply = post_json(args.server.rstrip("/") + "/command/joint23", {"qpos": warmup_rows.tolist()})
         print(f"[replay] warmup qpos0 rows: {reply}")

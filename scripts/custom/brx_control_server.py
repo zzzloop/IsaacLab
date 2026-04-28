@@ -254,6 +254,12 @@ class ControlHandler(BaseHTTPRequestHandler):
                 rows = _rows_from_payload(payload, "qpos", 23)
                 version = COMMAND_BUFFER.set_command("joint23", rows)
                 self._send_json(200, {"ok": True, "mode": "joint23", "rows": len(rows), "version": version})
+            elif self.path == "/command/reset_joint23":
+                rows = _rows_from_payload(payload, "qpos", 23)
+                if len(rows) != 1:
+                    raise ValueError("reset_joint23 expects exactly one 23D qpos row")
+                version = COMMAND_BUFFER.set_command("reset_joint23", rows)
+                self._send_json(200, {"ok": True, "mode": "reset_joint23", "rows": len(rows), "version": version})
             elif self.path == "/command/stop":
                 version = COMMAND_BUFFER.set_command("stop", [])
                 self._send_json(200, {"ok": True, "mode": "stop", "version": version})
@@ -507,12 +513,25 @@ def _apply_gripper_targets(robot: Articulation, left_grip: float, right_grip: fl
     robot.set_joint_position_target(targets, joint_ids=joint_ids)
 
 
-def _apply_joint23(robot: Articulation, row: list[float]) -> None:
+def _joint23_to_full_tensor(robot: Articulation, row: list[float]) -> torch.Tensor:
     target = robot.data.joint_pos.clone()
     for fk_idx, joint_name in enumerate(EXPECTED_MOVABLE_JOINTS):
         if joint_name in robot.joint_names:
             target[:, robot.joint_names.index(joint_name)] = float(row[fk_idx])
+    return target
+
+
+def _apply_joint23(robot: Articulation, row: list[float]) -> None:
+    target = _joint23_to_full_tensor(robot, row)
     robot.set_joint_position_target(target)
+
+
+def _reset_joint23(robot: Articulation, row: list[float]) -> None:
+    target = _joint23_to_full_tensor(robot, row)
+    joint_vel = torch.zeros_like(target)
+    robot.write_joint_state_to_sim(target, joint_vel)
+    robot.set_joint_position_target(target)
+    robot.reset()
 
 
 def _apply_ee6d(sim: SimulationContext, robot: Articulation, left_ctx: ArmIkContext, right_ctx: ArmIkContext, row: list[float]) -> None:
@@ -597,6 +616,9 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
 
         if current_mode == "joint23" and current_row is not None:
             _apply_joint23(robot, current_row)
+        elif current_mode == "reset_joint23" and current_row is not None:
+            _reset_joint23(robot, current_row)
+            COMMAND_BUFFER.set_command("stop", [])
         elif current_mode == "ee6d" and current_row is not None:
             _apply_ee6d(sim, robot, left_ctx, right_ctx, current_row)
         elif current_mode == "stop":
