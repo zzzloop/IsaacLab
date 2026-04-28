@@ -45,7 +45,7 @@ parser = argparse.ArgumentParser(description="Bridge X-VLA /act output to BRX /c
 parser.add_argument("--brx_url", type=str, default="http://127.0.0.1:8765", help="BRX control server base URL.")
 parser.add_argument("--xvla_url", type=str, default="http://127.0.0.1:8010/act", help="X-VLA inference endpoint URL.")
 parser.add_argument("--instruction", type=str, default="put the block into the bucket")
-parser.add_argument("--domain_id", type=int, default=6, help="Domain id passed to X-VLA server. Keep 6 if using RobotWin-style dual-arm ee6d.")
+parser.add_argument("--domain_id", type=int, default=0, help="Domain id passed to X-VLA server. For this custom dataset, datasets/domain_config.py maps custom -> 0.")
 parser.add_argument("--steps", type=int, default=30, help="Requested X-VLA action chunk length.")
 parser.add_argument("--exec_rows", type=int, default=30, help="Rows from each returned action chunk to execute.")
 parser.add_argument("--cycles", type=int, default=1, help="How many observe-predict-execute cycles to run. Use -1 for forever.")
@@ -65,6 +65,8 @@ parser.add_argument("--min_z", type=float, default=0.45, help="Minimum allowed E
 parser.add_argument("--max_z", type=float, default=1.25, help="Maximum allowed EE target z in robot base frame.")
 parser.add_argument("--gripper_min", type=float, default=0.0)
 parser.add_argument("--gripper_max", type=float, default=0.041)
+parser.add_argument("--normalized_gripper", action="store_true", default=True, help="Map model gripper outputs from [0, 1] to jaw meters before sending to BRX.")
+parser.add_argument("--raw_gripper", dest="normalized_gripper", action="store_false", help="Use model gripper outputs as jaw meters directly.")
 parser.add_argument("--reject_unsafe", action="store_true", help="Reject chunks that required safety clipping instead of sending clipped commands.")
 parser.add_argument("--unsafe_report_rows", type=int, default=5, help="Rows to print from safety diagnostics.")
 args = parser.parse_args()
@@ -181,6 +183,8 @@ def _apply_safety_filter(action: np.ndarray, state: dict[str, Any]) -> tuple[np.
 
     for grip_idx, side in [(9, "left_gripper"), (19, "right_gripper")]:
         raw = safe[:, grip_idx].copy()
+        if args.normalized_gripper:
+            safe[:, grip_idx] = safe[:, grip_idx] * args.gripper_max
         safe[:, grip_idx] = np.clip(safe[:, grip_idx], args.gripper_min, args.gripper_max)
         changed = np.where(np.abs(raw - safe[:, grip_idx]) > 1e-6)[0]
         for row_idx in changed.tolist():
