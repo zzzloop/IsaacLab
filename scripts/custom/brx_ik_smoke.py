@@ -14,7 +14,7 @@ Usage examples:
     ./isaaclab.sh -p scripts/custom/brx_ik_smoke.py --print_only
 
     ./isaaclab.sh -p scripts/custom/brx_ik_smoke.py \
-        --urdf_path /home/kemove/zzk_data/IsaacLab/BRXURDF0401.urdf
+        --urdf_path /home/kemove/zzk_data/IsaacLab/BRX042501_wheel.urdf
 
 The first stage intentionally does not call X-VLA. It verifies that the URDF import,
 articulation, body names, joint names, Jacobians, and Differential IK control path
@@ -34,8 +34,8 @@ parser = argparse.ArgumentParser(description="BRX URDF Differential IK smoke tes
 parser.add_argument(
     "--urdf_path",
     type=str,
-    default="/home/kemove/zzk_data/IsaacLab/BRXURDF0401.urdf",
-    help="Path to BRXURDF0401.urdf. The URDF mesh paths must be valid from this file.",
+    default="/home/kemove/zzk_data/IsaacLab/BRX042501_wheel.urdf",
+    help="Path to BRX042501_wheel.urdf. The URDF mesh paths must be valid from this file.",
 )
 parser.add_argument(
     "--usd_dir",

@@ -248,7 +248,7 @@ def print_summary(name: str, ee6d: np.ndarray) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Replay ACT HDF5 action/qpos through BRX Isaac Lab server.")
     parser.add_argument("--hdf5", required=True, help="Path to ACT episode HDF5, for example /home/kemove/ACT_Datasets/episode_0.hdf5")
-    parser.add_argument("--urdf_path", required=True, help="Path to BRXURDF0401.urdf")
+    parser.add_argument("--urdf_path", required=True, help="Path to BRX042501_wheel.urdf")
     parser.add_argument("--server", default="http://127.0.0.1:8765", help="BRX control server base URL")
     parser.add_argument("--dataset", choices=["action", "qpos"], default="action", help="Replay /action or /observations/qpos")
     parser.add_argument("--control_mode", choices=["ee6d", "joint23"], default="ee6d", help="ee6d uses FK+IK; joint23 sends 23-D joint targets directly")

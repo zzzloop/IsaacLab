@@ -21,7 +21,7 @@ control interfaces:
 
 Example:
     ./isaaclab.sh -p scripts/custom/brx_control_server.py \
-        --urdf_path /home/kemove/zzk_data/IsaacLab/BRXURDF0401.urdf \
+        --urdf_path /home/kemove/zzk_data/IsaacLab/BRX042501_wheel.urdf \
         --force_usd_conversion --no_instanceable
 """
 
@@ -40,7 +40,7 @@ from isaaclab.app import AppLauncher
 
 
 parser = argparse.ArgumentParser(description="BRX Isaac Lab HTTP control server.")
-parser.add_argument("--urdf_path", type=str, default="/home/kemove/zzk_data/IsaacLab/BRXURDF0401.urdf")
+parser.add_argument("--urdf_path", type=str, default="/home/kemove/zzk_data/IsaacLab/BRX042501_wheel.urdf")
 parser.add_argument("--usd_dir", type=str, default=None)
 parser.add_argument("--force_usd_conversion", action="store_true")
 parser.add_argument("--no_instanceable", action="store_true")
@@ -107,8 +107,8 @@ EXPECTED_MOVABLE_JOINTS = [
 ]
 LEFT_ARM_JOINTS = [f"ArmL0{i}_Joint" for i in range(2, 9)]
 RIGHT_ARM_JOINTS = [f"ArmR0{i}_Joint" for i in range(2, 9)]
-LEFT_GRIPPER_JOINTS = ["JawBlock01_Joint", "JawBlock02_Joint"]
-RIGHT_GRIPPER_JOINTS = ["JawBlock03_Joint", "JawBlock04_Joint"]
+LEFT_GRIPPER_JOINTS = ["JawBlock03_Joint", "JawBlock04_Joint"]
+RIGHT_GRIPPER_JOINTS = ["JawBlock01_Joint", "JawBlock02_Joint"]
 CAMERA_NAMES = ["head", "left_wrist", "right_wrist"]
 
 
