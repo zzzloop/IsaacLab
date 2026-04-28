@@ -57,6 +57,27 @@ parser.add_argument("--velocity_limit", type=float, default=60.0, help="Implicit
 parser.add_argument("--no_task_scene", action="store_true")
 parser.add_argument("--camera_width", type=int, default=640)
 parser.add_argument("--camera_height", type=int, default=480)
+parser.add_argument(
+    "--left_wrist_camera_offset",
+    type=float,
+    nargs=3,
+    default=(0.04, 0.0, 0.04),
+    help="Left wrist camera local xyz offset in the left EE body frame.",
+)
+parser.add_argument(
+    "--right_wrist_camera_offset",
+    type=float,
+    nargs=3,
+    default=(0.04, 0.0, 0.04),
+    help="Right wrist camera local xyz offset in the right EE body frame.",
+)
+parser.add_argument(
+    "--wrist_camera_forward",
+    type=float,
+    nargs=3,
+    default=(0.25, 0.0, 0.0),
+    help="Local look-at vector for wrist cameras in each EE body frame.",
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -434,6 +455,43 @@ def _configure_camera_poses(camera: Camera, device: str) -> None:
     camera.set_world_poses_from_view(eyes, targets)
 
 
+def _quat_apply(quat: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
+    """Rotate vec by Isaac Lab's wxyz quaternion."""
+    q_vec = quat[..., 1:4]
+    q_w = quat[..., 0:1]
+    uv = torch.cross(q_vec, vec, dim=-1)
+    uuv = torch.cross(q_vec, uv, dim=-1)
+    return vec + 2.0 * (q_w * uv + uuv)
+
+
+def _update_camera_poses(
+    camera: Camera,
+    robot: Articulation,
+    left_ctx: ArmIkContext,
+    right_ctx: ArmIkContext,
+    device: str,
+) -> None:
+    """Keep camera order aligned with X-VLA: left_eye/global, left_wrist, right_wrist."""
+    head_eye = torch.tensor([1.35, -1.15, 1.25], dtype=torch.float32, device=device)
+    head_target = torch.tensor([0.70, 0.00, 0.50], dtype=torch.float32, device=device)
+
+    left_pose = robot.data.body_state_w[0, left_ctx.entity_cfg.body_ids[0], 0:7]
+    right_pose = robot.data.body_state_w[0, right_ctx.entity_cfg.body_ids[0], 0:7]
+
+    left_offset = torch.tensor(args_cli.left_wrist_camera_offset, dtype=torch.float32, device=device)
+    right_offset = torch.tensor(args_cli.right_wrist_camera_offset, dtype=torch.float32, device=device)
+    forward = torch.tensor(args_cli.wrist_camera_forward, dtype=torch.float32, device=device)
+
+    left_eye = left_pose[0:3] + _quat_apply(left_pose[3:7], left_offset)
+    right_eye = right_pose[0:3] + _quat_apply(right_pose[3:7], right_offset)
+    left_target = left_eye + _quat_apply(left_pose[3:7], forward)
+    right_target = right_eye + _quat_apply(right_pose[3:7], forward)
+
+    eyes = torch.stack([head_eye, left_eye, right_eye], dim=0)
+    targets = torch.stack([head_target, left_target, right_target], dim=0)
+    camera.set_world_poses_from_view(eyes, targets)
+
+
 def _rgb_tensor_to_png_bytes(rgb: torch.Tensor) -> bytes:
     array = rgb.detach().cpu().numpy()
     if array.shape[-1] == 4:
@@ -595,6 +653,9 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
 
     left_ctx = _resolve_arm(sim, robot, LEFT_ARM_JOINTS, args_cli.left_ee_body)
     right_ctx = _resolve_arm(sim, robot, RIGHT_ARM_JOINTS, args_cli.right_ee_body)
+    _update_camera_poses(camera, robot, left_ctx, right_ctx, sim.device)
+    camera.update(sim_dt)
+    _update_camera_cache(camera)
     missing = [name for name in EXPECTED_MOVABLE_JOINTS if name not in robot.joint_names]
     if missing:
         raise RuntimeError(f"Missing expected joint names: {missing}")
@@ -627,6 +688,7 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
         robot.write_data_to_sim()
         sim.step()
         robot.update(sim_dt)
+        _update_camera_poses(camera, robot, left_ctx, right_ctx, sim.device)
         camera.update(sim_dt)
         _update_camera_cache(camera)
         COMMAND_BUFFER.set_state(_state_snapshot(robot, left_ctx, right_ctx))
