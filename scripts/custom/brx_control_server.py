@@ -48,6 +48,8 @@ parser.add_argument("--robot_prim", type=str, default="/World/Robot")
 parser.add_argument("--left_ee_body", type=str, default="LinearclampinggripperJZ02_Link")
 parser.add_argument("--right_ee_body", type=str, default="LinearclampinggripperJZ01_Link")
 parser.add_argument("--head_camera_body", type=str, default="EyeL_Link", help="Robot body used by /camera/head.png.")
+parser.add_argument("--left_wrist_camera_body", type=str, default="HandCam02_Link", help="URDF camera body used by /camera/left_wrist.png.")
+parser.add_argument("--right_wrist_camera_body", type=str, default="HandCam01_Link", help="URDF camera body used by /camera/right_wrist.png.")
 parser.add_argument("--host", type=str, default="127.0.0.1")
 parser.add_argument("--port", type=int, default=8765)
 parser.add_argument("--command_hold_steps", type=int, default=1, help="Simulation steps to hold each row of a command chunk.")
@@ -58,13 +60,6 @@ parser.add_argument("--velocity_limit", type=float, default=60.0, help="Implicit
 parser.add_argument("--no_task_scene", action="store_true")
 parser.add_argument("--camera_width", type=int, default=640)
 parser.add_argument("--camera_height", type=int, default=480)
-parser.add_argument(
-    "--left_wrist_camera_offset",
-    type=float,
-    nargs=3,
-    default=(0.04, 0.0, 0.04),
-    help="Left wrist camera local xyz offset in the left EE body frame.",
-)
 parser.add_argument(
     "--head_camera_offset",
     type=float,
@@ -80,18 +75,11 @@ parser.add_argument(
     help="Local look-at vector for /camera/head.png in head_camera_body frame.",
 )
 parser.add_argument(
-    "--right_wrist_camera_offset",
-    type=float,
-    nargs=3,
-    default=(0.04, 0.0, 0.04),
-    help="Right wrist camera local xyz offset in the right EE body frame.",
-)
-parser.add_argument(
     "--wrist_camera_forward",
     type=float,
     nargs=3,
     default=(0.25, 0.0, 0.0),
-    help="Local look-at vector for wrist cameras in each EE body frame.",
+    help="Local look-at vector for wrist cameras in their URDF camera body frames.",
 )
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
@@ -483,24 +471,22 @@ def _update_camera_poses(
     camera: Camera,
     robot: Articulation,
     head_body_id: int,
-    left_ctx: ArmIkContext,
-    right_ctx: ArmIkContext,
+    left_wrist_camera_body_id: int,
+    right_wrist_camera_body_id: int,
     device: str,
 ) -> None:
     """Keep camera order aligned with X-VLA: left_eye/global, left_wrist, right_wrist."""
     head_pose = robot.data.body_state_w[0, head_body_id, 0:7]
-    left_pose = robot.data.body_state_w[0, left_ctx.entity_cfg.body_ids[0], 0:7]
-    right_pose = robot.data.body_state_w[0, right_ctx.entity_cfg.body_ids[0], 0:7]
+    left_pose = robot.data.body_state_w[0, left_wrist_camera_body_id, 0:7]
+    right_pose = robot.data.body_state_w[0, right_wrist_camera_body_id, 0:7]
 
     head_offset = torch.tensor(args_cli.head_camera_offset, dtype=torch.float32, device=device)
     head_forward = torch.tensor(args_cli.head_camera_forward, dtype=torch.float32, device=device)
-    left_offset = torch.tensor(args_cli.left_wrist_camera_offset, dtype=torch.float32, device=device)
-    right_offset = torch.tensor(args_cli.right_wrist_camera_offset, dtype=torch.float32, device=device)
     wrist_forward = torch.tensor(args_cli.wrist_camera_forward, dtype=torch.float32, device=device)
 
     head_eye = head_pose[0:3] + _quat_apply(head_pose[3:7], head_offset)
-    left_eye = left_pose[0:3] + _quat_apply(left_pose[3:7], left_offset)
-    right_eye = right_pose[0:3] + _quat_apply(right_pose[3:7], right_offset)
+    left_eye = left_pose[0:3]
+    right_eye = right_pose[0:3]
     head_target = head_eye + _quat_apply(head_pose[3:7], head_forward)
     left_target = left_eye + _quat_apply(left_pose[3:7], wrist_forward)
     right_target = right_eye + _quat_apply(right_pose[3:7], wrist_forward)
@@ -678,7 +664,16 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
     if args_cli.head_camera_body not in robot.body_names:
         raise RuntimeError(f"Missing head camera body: {args_cli.head_camera_body}")
     head_body_id = robot.body_names.index(args_cli.head_camera_body)
-    _update_camera_poses(camera, robot, head_body_id, left_ctx, right_ctx, sim.device)
+    if args_cli.left_wrist_camera_body not in robot.body_names:
+        raise RuntimeError(f"Missing left wrist camera body: {args_cli.left_wrist_camera_body}")
+    if args_cli.right_wrist_camera_body not in robot.body_names:
+        raise RuntimeError(f"Missing right wrist camera body: {args_cli.right_wrist_camera_body}")
+    left_wrist_camera_body_id = robot.body_names.index(args_cli.left_wrist_camera_body)
+    right_wrist_camera_body_id = robot.body_names.index(args_cli.right_wrist_camera_body)
+    print(f"[BRX] head camera body: {args_cli.head_camera_body} -> body_index={head_body_id}")
+    print(f"[BRX] left wrist camera body: {args_cli.left_wrist_camera_body} -> body_index={left_wrist_camera_body_id}")
+    print(f"[BRX] right wrist camera body: {args_cli.right_wrist_camera_body} -> body_index={right_wrist_camera_body_id}")
+    _update_camera_poses(camera, robot, head_body_id, left_wrist_camera_body_id, right_wrist_camera_body_id, sim.device)
     camera.update(sim_dt)
     _update_camera_cache(camera)
 
@@ -710,7 +705,7 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
         robot.write_data_to_sim()
         sim.step()
         robot.update(sim_dt)
-        _update_camera_poses(camera, robot, head_body_id, left_ctx, right_ctx, sim.device)
+        _update_camera_poses(camera, robot, head_body_id, left_wrist_camera_body_id, right_wrist_camera_body_id, sim.device)
         camera.update(sim_dt)
         _update_camera_cache(camera)
         COMMAND_BUFFER.set_state(_state_snapshot(robot, left_ctx, right_ctx))
