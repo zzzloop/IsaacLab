@@ -190,8 +190,12 @@ def joint23_to_ee6d(q: np.ndarray, fk: SimpleURDFFK, config: ReplayConfig) -> np
         left_tf = poses[LEFT_EE_LINK]
         right_tf = poses[RIGHT_EE_LINK]
 
-        left_grip01 = gripper_opening01(row, 10, 11)
-        right_grip01 = gripper_opening01(row, 19, 20)
+        # New BRX042501 kinematic chains:
+        #   left EE  LinearclampinggripperJZ02_Link uses JawBlock03/04 -> row[19], row[20]
+        #   right EE LinearclampinggripperJZ01_Link uses JawBlock01/02 -> row[10], row[11]
+        # Keep this identical to datasets/domain_handler/custom_handler.py and brx_control_server.py.
+        left_grip01 = gripper_opening01(row, 19, 20)
+        right_grip01 = gripper_opening01(row, 10, 11)
         if config.gripper_units == "meters":
             left_grip = left_grip01 * config.gripper_max_m
             right_grip = right_grip01 * config.gripper_max_m
