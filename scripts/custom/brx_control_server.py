@@ -84,15 +84,6 @@ EXPECTED_MOVABLE_JOINTS = [
     "FoldingModularJoint02_Joint",
     "FoldingModularJoint03_Joint",
     "Trunk_Joint",
-    "ArmR02_Joint",
-    "ArmR03_Joint",
-    "ArmR04_Joint",
-    "ArmR05_Joint",
-    "ArmR06_Joint",
-    "ArmR07_Joint",
-    "ArmR08_Joint",
-    "JawBlock01_Joint",
-    "JawBlock02_Joint",
     "ArmL02_Joint",
     "ArmL03_Joint",
     "ArmL04_Joint",
@@ -100,6 +91,15 @@ EXPECTED_MOVABLE_JOINTS = [
     "ArmL06_Joint",
     "ArmL07_Joint",
     "ArmL08_Joint",
+    "JawBlock01_Joint",
+    "JawBlock02_Joint",
+    "ArmR02_Joint",
+    "ArmR03_Joint",
+    "ArmR04_Joint",
+    "ArmR05_Joint",
+    "ArmR06_Joint",
+    "ArmR07_Joint",
+    "ArmR08_Joint",
     "JawBlock03_Joint",
     "JawBlock04_Joint",
     "Head02_Joint",
@@ -107,8 +107,8 @@ EXPECTED_MOVABLE_JOINTS = [
 ]
 LEFT_ARM_JOINTS = [f"ArmL0{i}_Joint" for i in range(2, 9)]
 RIGHT_ARM_JOINTS = [f"ArmR0{i}_Joint" for i in range(2, 9)]
-LEFT_GRIPPER_JOINTS = ["JawBlock03_Joint", "JawBlock04_Joint"]
-RIGHT_GRIPPER_JOINTS = ["JawBlock01_Joint", "JawBlock02_Joint"]
+LEFT_GRIPPER_JOINTS = ["JawBlock01_Joint", "JawBlock02_Joint"]
+RIGHT_GRIPPER_JOINTS = ["JawBlock03_Joint", "JawBlock04_Joint"]
 CAMERA_NAMES = ["head", "left_wrist", "right_wrist"]
 
 

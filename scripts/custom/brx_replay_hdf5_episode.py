@@ -35,15 +35,6 @@ EXPECTED_JOINT_NAMES = [
     "FoldingModularJoint02_Joint",
     "FoldingModularJoint03_Joint",
     "Trunk_Joint",
-    "ArmR02_Joint",
-    "ArmR03_Joint",
-    "ArmR04_Joint",
-    "ArmR05_Joint",
-    "ArmR06_Joint",
-    "ArmR07_Joint",
-    "ArmR08_Joint",
-    "JawBlock01_Joint",
-    "JawBlock02_Joint",
     "ArmL02_Joint",
     "ArmL03_Joint",
     "ArmL04_Joint",
@@ -51,12 +42,20 @@ EXPECTED_JOINT_NAMES = [
     "ArmL06_Joint",
     "ArmL07_Joint",
     "ArmL08_Joint",
+    "JawBlock01_Joint",
+    "JawBlock02_Joint",
+    "ArmR02_Joint",
+    "ArmR03_Joint",
+    "ArmR04_Joint",
+    "ArmR05_Joint",
+    "ArmR06_Joint",
+    "ArmR07_Joint",
+    "ArmR08_Joint",
     "JawBlock03_Joint",
     "JawBlock04_Joint",
     "Head02_Joint",
     "Head03_Joint",
 ]
-
 LEFT_EE_LINK = "LinearclampinggripperJZ02_Link"
 RIGHT_EE_LINK = "LinearclampinggripperJZ01_Link"
 DEFAULT_GRIPPER_MAX_M = 0.041
@@ -97,8 +96,8 @@ class SimpleURDFFK:
             raise ValueError(f"URDF should have exactly one root link, got {roots}")
         self.root_link = roots[0]
 
-        # This must match the ACT recording order used during X-VLA fine-tuning.
-        self.movable_joint_names = [str(joint["name"]) for joint in self.joints if joint["type"] != "fixed"]
+        # Match the old Isaac Gym active DOF order: robot_qpos[8:31] / robot_dof_state[i+8].
+        self.movable_joint_names = list(EXPECTED_JOINT_NAMES)
 
     @staticmethod
     def _parse_vec(text: str) -> np.ndarray:
@@ -191,8 +190,8 @@ def joint23_to_ee6d(q: np.ndarray, fk: SimpleURDFFK, config: ReplayConfig) -> np
         left_tf = poses[LEFT_EE_LINK]
         right_tf = poses[RIGHT_EE_LINK]
 
-        left_grip01 = gripper_opening01(row, 19, 20)
-        right_grip01 = gripper_opening01(row, 10, 11)
+        left_grip01 = gripper_opening01(row, 10, 11)
+        right_grip01 = gripper_opening01(row, 19, 20)
         if config.gripper_units == "meters":
             left_grip = left_grip01 * config.gripper_max_m
             right_grip = right_grip01 * config.gripper_max_m
