@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import io
 import threading
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -50,6 +51,8 @@ parser.add_argument("--host", type=str, default="127.0.0.1")
 parser.add_argument("--port", type=int, default=8765)
 parser.add_argument("--command_hold_steps", type=int, default=4, help="Simulation steps to hold each row of a command chunk.")
 parser.add_argument("--no_task_scene", action="store_true")
+parser.add_argument("--camera_width", type=int, default=640)
+parser.add_argument("--camera_height", type=int, default=480)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -58,6 +61,7 @@ simulation_app = app_launcher.app
 
 import torch
 import torch.nn.functional as F
+from PIL import Image
 
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
@@ -65,6 +69,7 @@ from isaaclab.assets import Articulation
 from isaaclab.assets.articulation import ArticulationCfg
 from isaaclab.controllers import DifferentialIKController, DifferentialIKControllerCfg
 from isaaclab.managers import SceneEntityCfg
+from isaaclab.sensors import Camera, CameraCfg
 from isaaclab.sim import SimulationContext
 from isaaclab.sim.converters import UrdfConverterCfg
 from isaaclab.utils.assets import check_file_path
@@ -100,6 +105,7 @@ LEFT_ARM_JOINTS = [f"ArmL0{i}_Joint" for i in range(2, 9)]
 RIGHT_ARM_JOINTS = [f"ArmR0{i}_Joint" for i in range(2, 9)]
 LEFT_GRIPPER_JOINTS = ["JawBlock03_Joint", "JawBlock04_Joint"]
 RIGHT_GRIPPER_JOINTS = ["JawBlock01_Joint", "JawBlock02_Joint"]
+CAMERA_NAMES = ["head", "left_wrist", "right_wrist"]
 
 
 @dataclass(frozen=True)
@@ -143,7 +149,28 @@ class CommandBuffer:
             self.state = state
 
 
+
+class CameraBuffer:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.frames: dict[str, bytes] = {}
+        self.frame_id = 0
+
+    def set_frame(self, name: str, png_bytes: bytes) -> None:
+        with self._lock:
+            self.frames[name] = png_bytes
+            self.frame_id += 1
+
+    def get_frame(self, name: str) -> bytes | None:
+        with self._lock:
+            return self.frames.get(name)
+
+    def status(self) -> dict[str, Any]:
+        with self._lock:
+            return {"frame_id": self.frame_id, "available": sorted(self.frames.keys())}
+
 COMMAND_BUFFER = CommandBuffer()
+CAMERA_BUFFER = CameraBuffer()
 
 
 def _abs_path(path: str) -> str:
@@ -182,6 +209,13 @@ class ControlHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _send_png(self, code: int, data: bytes) -> None:
+        self.send_response(code)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def _read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
         if length <= 0:
@@ -193,6 +227,15 @@ class ControlHandler(BaseHTTPRequestHandler):
             self._send_json(200, COMMAND_BUFFER.get_state())
         elif self.path == "/health":
             self._send_json(200, {"ok": True})
+        elif self.path == "/camera":
+            self._send_json(200, CAMERA_BUFFER.status())
+        elif self.path in ("/camera/head.png", "/camera/left_wrist.png", "/camera/right_wrist.png"):
+            name = self.path.split("/")[-1].replace(".png", "")
+            frame = CAMERA_BUFFER.get_frame(name)
+            if frame is None:
+                self._send_json(503, {"error": f"camera frame not ready: {name}"})
+            else:
+                self._send_png(200, frame)
         else:
             self._send_json(404, {"error": "unknown endpoint"})
 
@@ -336,6 +379,75 @@ def _spawn_scene() -> None:
     _spawn_rigid_cube("/World/TaskScene/BlockBlue", cube_size, (0.56, -0.16, cube_z), (0.08, 0.22, 0.9))
 
 
+
+def _make_cameras() -> Camera:
+    """Create three fixed RGB cameras for the X-VLA bridge."""
+    sim_utils.create_prim("/World/Cameras", "Xform")
+    for name in ["Cam00Head", "Cam01LeftWrist", "Cam02RightWrist"]:
+        sim_utils.create_prim(f"/World/Cameras/{name}", "Xform")
+
+    camera_cfg = CameraCfg(
+        prim_path="/World/Cameras/Cam.*/CameraSensor",
+        update_period=0.0,
+        height=args_cli.camera_height,
+        width=args_cli.camera_width,
+        data_types=["rgb"],
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=18.0,
+            focus_distance=2.0,
+            horizontal_aperture=24.0,
+            clipping_range=(0.05, 20.0),
+        ),
+    )
+    return Camera(cfg=camera_cfg)
+
+
+def _configure_camera_poses(camera: Camera, device: str) -> None:
+    eyes = torch.tensor(
+        [
+            [1.35, -1.15, 1.25],
+            [0.72, 0.82, 0.78],
+            [0.72, -0.82, 0.78],
+        ],
+        dtype=torch.float32,
+        device=device,
+    )
+    targets = torch.tensor(
+        [
+            [0.70, 0.00, 0.50],
+            [0.64, 0.10, 0.50],
+            [0.64, -0.10, 0.50],
+        ],
+        dtype=torch.float32,
+        device=device,
+    )
+    camera.set_world_poses_from_view(eyes, targets)
+
+
+def _rgb_tensor_to_png_bytes(rgb: torch.Tensor) -> bytes:
+    array = rgb.detach().cpu().numpy()
+    if array.shape[-1] == 4:
+        array = array[..., :3]
+    if array.dtype != "uint8":
+        if array.max() <= 1.0:
+            array = array * 255.0
+        array = array.clip(0, 255).astype("uint8")
+    image = Image.fromarray(array)
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _update_camera_cache(camera: Camera) -> None:
+    if "rgb" not in camera.data.output:
+        return
+    rgb = camera.data.output["rgb"]
+    if rgb.ndim != 4:
+        return
+    for index, name in enumerate(CAMERA_NAMES):
+        if index < rgb.shape[0]:
+            CAMERA_BUFFER.set_frame(name, _rgb_tensor_to_png_bytes(rgb[index]))
+
 def _resolve_arm(sim: SimulationContext, robot: Articulation, joint_names: list[str], body_name: str) -> ArmIkContext:
     entity_cfg = SceneEntityCfg("robot", joint_names=joint_names, body_names=[body_name])
     entity_cfg.resolve({"robot": robot})
@@ -449,11 +561,14 @@ def _state_snapshot(robot: Articulation, left_ctx: ArmIkContext, right_ctx: ArmI
     }
 
 
-def run_simulator(sim: SimulationContext, robot: Articulation) -> None:
+def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -> None:
     sim_dt = sim.get_physics_dt()
+    _configure_camera_poses(camera, sim.device)
     robot.write_data_to_sim()
     sim.step()
     robot.update(sim_dt)
+    camera.update(sim_dt)
+    _update_camera_cache(camera)
 
     left_ctx = _resolve_arm(sim, robot, LEFT_ARM_JOINTS, args_cli.left_ee_body)
     right_ctx = _resolve_arm(sim, robot, RIGHT_ARM_JOINTS, args_cli.right_ee_body)
@@ -486,6 +601,8 @@ def run_simulator(sim: SimulationContext, robot: Articulation) -> None:
         robot.write_data_to_sim()
         sim.step()
         robot.update(sim_dt)
+        camera.update(sim_dt)
+        _update_camera_cache(camera)
         COMMAND_BUFFER.set_state(_state_snapshot(robot, left_ctx, right_ctx))
 
 
@@ -494,12 +611,13 @@ def main() -> None:
     sim = SimulationContext(sim_cfg)
     sim.set_camera_view([2.5, -2.5, 2.0], [0.5, 0.0, 0.5])
     _spawn_scene()
+    camera = _make_cameras()
     robot = Articulation(cfg=_make_robot_cfg())
     sim.reset()
     server = _start_http_server()
     print("[BRX] Setup complete.")
     try:
-        run_simulator(sim, robot)
+        run_simulator(sim, robot, camera)
     finally:
         server.shutdown()
 
