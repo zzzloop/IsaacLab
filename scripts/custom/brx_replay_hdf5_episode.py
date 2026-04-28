@@ -259,6 +259,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_rows", type=int, default=None, help="Optional maximum rows after slicing")
     parser.add_argument("--chunk_size", type=int, default=0, help="Rows per request. 0 sends the full selected trajectory once.")
     parser.add_argument("--sleep", type=float, default=0.3, help="Seconds to sleep between chunks when --chunk_size > 0")
+    parser.add_argument("--stream_hz", type=float, default=0.0, help="If >0, send one row per HTTP request at this frequency, e.g. 30 for ACT 30Hz replay")
     parser.add_argument("--dry_run", action="store_true", help="Only load and convert; do not send commands")
     parser.add_argument("--stop_first", action="store_true", help="Send /command/stop before replay")
     parser.add_argument("--warmup_qpos0", type=int, default=0, help="Before replaying, send observations/qpos[0] to /command/joint23 this many times")
@@ -346,8 +347,24 @@ def main() -> None:
         print(f"[replay] warmup qpos0 rows: {reply}")
         time.sleep(max(0.2, args.warmup_qpos0 * 0.02))
 
+    payload_key = "qpos" if args.control_mode == "joint23" else "action"
+
+    if args.stream_hz > 0:
+        period = 1.0 / args.stream_hz
+        total = command_rows.shape[0]
+        print(f"[replay] streaming {total} rows at {args.stream_hz:.3f} Hz with payload key {payload_key}")
+        next_time = time.monotonic()
+        for i, row in enumerate(command_rows):
+            reply = post_json(endpoint, {payload_key: [row.tolist()]})
+            if i == 0 or i == total - 1 or i % max(1, int(args.stream_hz)) == 0:
+                print(f"[replay] streamed row {i + 1}/{total}: {reply}")
+            next_time += period
+            delay = next_time - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+        return
+
     if args.chunk_size == 0:
-        payload_key = "qpos" if args.control_mode == "joint23" else "action"
         reply = post_json(endpoint, {payload_key: command_rows.tolist()})
         print(f"[replay] sent all rows: {reply}")
         return
@@ -355,7 +372,6 @@ def main() -> None:
     total = command_rows.shape[0]
     for start in range(0, total, args.chunk_size):
         end = min(start + args.chunk_size, total)
-        payload_key = "qpos" if args.control_mode == "joint23" else "action"
         reply = post_json(endpoint, {payload_key: command_rows[start:end].tolist()})
         print(f"[replay] sent rows {start}:{end}: {reply}")
         if end < total:
