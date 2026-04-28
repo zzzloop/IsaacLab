@@ -275,7 +275,7 @@ def _spawn_pick_place_scene() -> None:
 
     table_center_x = 0.72
     table_center_y = 0.0
-    table_top_z = 0.46
+    table_top_z = 0.74
     tabletop_thickness = 0.055
     tabletop_center_z = table_top_z - tabletop_thickness * 0.5
 
