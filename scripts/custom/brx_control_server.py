@@ -49,7 +49,11 @@ parser.add_argument("--left_ee_body", type=str, default="LinearclampinggripperJZ
 parser.add_argument("--right_ee_body", type=str, default="LinearclampinggripperJZ01_Link")
 parser.add_argument("--host", type=str, default="127.0.0.1")
 parser.add_argument("--port", type=int, default=8765)
-parser.add_argument("--command_hold_steps", type=int, default=4, help="Simulation steps to hold each row of a command chunk.")
+parser.add_argument("--command_hold_steps", type=int, default=1, help="Simulation steps to hold each row of a command chunk.")
+parser.add_argument("--joint_stiffness", type=float, default=2500.0, help="Position drive stiffness for all imported robot joints.")
+parser.add_argument("--joint_damping", type=float, default=120.0, help="Position drive damping for all imported robot joints.")
+parser.add_argument("--effort_limit", type=float, default=800.0, help="Implicit actuator effort limit.")
+parser.add_argument("--velocity_limit", type=float, default=60.0, help="Implicit actuator velocity limit.")
 parser.add_argument("--no_task_scene", action="store_true")
 parser.add_argument("--camera_width", type=int, default=640)
 parser.add_argument("--camera_height", type=int, default=480)
@@ -285,7 +289,7 @@ def _make_robot_cfg() -> ArticulationCfg:
             self_collision=False,
             collision_from_visuals=False,
             joint_drive=UrdfConverterCfg.JointDriveCfg(
-                gains=UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=800.0, damping=40.0),
+                gains=UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=args_cli.joint_stiffness, damping=args_cli.joint_damping),
                 target_type="position",
                 drive_type="force",
             ),
@@ -300,8 +304,8 @@ def _make_robot_cfg() -> ArticulationCfg:
         actuators={
             "all_joints": ImplicitActuatorCfg(
                 joint_names_expr=[".*"],
-                effort_limit_sim=300.0,
-                velocity_limit_sim=20.0,
+                effort_limit_sim=args_cli.effort_limit,
+                velocity_limit_sim=args_cli.velocity_limit,
                 stiffness=800.0,
                 damping=40.0,
             )
