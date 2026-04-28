@@ -261,6 +261,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sleep", type=float, default=0.3, help="Seconds to sleep between chunks when --chunk_size > 0")
     parser.add_argument("--dry_run", action="store_true", help="Only load and convert; do not send commands")
     parser.add_argument("--stop_first", action="store_true", help="Send /command/stop before replay")
+    parser.add_argument("--warmup_qpos0", type=int, default=0, help="Before replaying, send observations/qpos[0] to /command/joint23 this many times")
+    parser.add_argument("--print_joint_table", action="store_true", help="Print per-joint first/last/min/max for the selected 23-D rows")
     parser.add_argument("--gripper_units", choices=["meters", "normalized"], default="meters", help="Server expects meters. Use normalized only for debugging raw training targets.")
     parser.add_argument("--gripper_max_m", type=float, default=DEFAULT_GRIPPER_MAX_M, help="Jaw command for fully open gripper in meters")
     return parser.parse_args()
@@ -303,6 +305,11 @@ def main() -> None:
     if q.size == 0:
         raise ValueError("Selected trajectory is empty. Check --start/--end/--stride/--max_rows.")
     print(f"[replay] selected joint rows: {q.shape}")
+    if args.print_joint_table:
+        print("[replay] selected 23-D joint table:")
+        for i, name in enumerate(EXPECTED_JOINT_NAMES):
+            col = q[:, i]
+            print(f"  {i:02d} {name}: first={float(col[0]): .5f} last={float(col[-1]): .5f} min={float(col.min()): .5f} max={float(col.max()): .5f}")
 
     config = ReplayConfig(gripper_max_m=args.gripper_max_m, gripper_units=args.gripper_units)
     ee6d = joint23_to_ee6d(q, fk, config)
@@ -329,15 +336,27 @@ def main() -> None:
         reply = post_json(args.server.rstrip("/") + "/command/stop", {})
         print(f"[replay] stop_first reply: {reply}")
 
+    if args.warmup_qpos0 > 0:
+        with h5py.File(args.hdf5, "r") as f:
+            if "observations/qpos" not in f:
+                raise KeyError("--warmup_qpos0 requires observations/qpos in the HDF5 file")
+            qpos0 = np.asarray(f["observations/qpos"][0], dtype=np.float32)
+        warmup_rows = np.repeat(qpos0[None, :], args.warmup_qpos0, axis=0)
+        reply = post_json(args.server.rstrip("/") + "/command/joint23", {"qpos": warmup_rows.tolist()})
+        print(f"[replay] warmup qpos0 rows: {reply}")
+        time.sleep(max(0.2, args.warmup_qpos0 * 0.02))
+
     if args.chunk_size == 0:
-        reply = post_json(endpoint, {"action": command_rows.tolist()})
+        payload_key = "qpos" if args.control_mode == "joint23" else "action"
+        reply = post_json(endpoint, {payload_key: command_rows.tolist()})
         print(f"[replay] sent all rows: {reply}")
         return
 
     total = command_rows.shape[0]
     for start in range(0, total, args.chunk_size):
         end = min(start + args.chunk_size, total)
-        reply = post_json(endpoint, {"action": command_rows[start:end].tolist()})
+        payload_key = "qpos" if args.control_mode == "joint23" else "action"
+        reply = post_json(endpoint, {payload_key: command_rows[start:end].tolist()})
         print(f"[replay] sent rows {start}:{end}: {reply}")
         if end < total:
             time.sleep(args.sleep)
