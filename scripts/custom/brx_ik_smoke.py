@@ -148,7 +148,7 @@ def _make_robot_cfg() -> ArticulationCfg:
         spawn=sim_utils.UrdfFileCfg(
             asset_path=urdf_path,
             usd_dir=usd_dir,
-            usd_file_name="brx_imported.usd",
+            usd_file_name=f"{os.path.splitext(os.path.basename(urdf_path))[0]}_imported.usd",
             force_usd_conversion=args_cli.force_usd_conversion,
             make_instanceable=not args_cli.no_instanceable,
             fix_base=True,
@@ -327,7 +327,7 @@ def _spawn_minimal_scene() -> None:
 def _converted_usd_path() -> str:
     urdf_path = _abs_path(args_cli.urdf_path)
     usd_dir = _abs_path(args_cli.usd_dir) if args_cli.usd_dir else os.path.join(os.path.dirname(urdf_path), "isaaclab_converted")
-    return os.path.join(usd_dir, "brx_imported.usd")
+    return os.path.join(usd_dir, f"{os.path.splitext(os.path.basename(urdf_path))[0]}_imported.usd")
 
 
 def _print_stage_visual_summary() -> None:

@@ -287,7 +287,7 @@ def _make_robot_cfg() -> ArticulationCfg:
         spawn=sim_utils.UrdfFileCfg(
             asset_path=urdf_path,
             usd_dir=usd_dir,
-            usd_file_name="brx_imported.usd",
+            usd_file_name=f"{os.path.splitext(os.path.basename(urdf_path))[0]}_imported.usd",
             force_usd_conversion=args_cli.force_usd_conversion,
             make_instanceable=not args_cli.no_instanceable,
             fix_base=True,
