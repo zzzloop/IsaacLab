@@ -558,7 +558,8 @@ def _rot6d_to_quat(rot6d: torch.Tensor) -> torch.Tensor:
 
 def _quat_to_rot6d(quat: torch.Tensor) -> list[float]:
     mat = matrix_from_quat(quat.reshape(1, 4))[0]
-    return mat[:, 0:2].reshape(-1).detach().cpu().tolist()
+    # 6D order is [first column xyz, second column xyz], matching _rot6d_to_quat().
+    return mat[:, 0:2].T.reshape(-1).detach().cpu().tolist()
 
 
 def _ee10_to_pose(row10: list[float], device: str) -> tuple[torch.Tensor, float]:

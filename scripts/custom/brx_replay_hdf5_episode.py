@@ -167,7 +167,8 @@ class ReplayConfig:
 
 
 def rotmat_to_6d(rot: np.ndarray) -> np.ndarray:
-    return rot[:, :2].reshape(6)
+    # 6D order is [first column xyz, second column xyz].
+    return rot[:, :2].T.reshape(6)
 
 
 def gripper_opening01(q: np.ndarray, pos_idx: int, neg_idx: int) -> float:
