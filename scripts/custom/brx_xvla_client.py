@@ -60,6 +60,13 @@ parser.add_argument("--image2", type=str, default=None, help="Path to image2. If
 parser.add_argument("--image0_url", type=str, default=None, help="HTTP endpoint returning image0 bytes.")
 parser.add_argument("--image1_url", type=str, default=None, help="HTTP endpoint returning image1 bytes.")
 parser.add_argument("--image2_url", type=str, default=None, help="HTTP endpoint returning image2 bytes.")
+parser.add_argument("--max_step_m", type=float, default=0.03, help="Max allowed xyz movement per action row, relative to previous target/current state.")
+parser.add_argument("--min_z", type=float, default=0.45, help="Minimum allowed EE target z in robot base frame.")
+parser.add_argument("--max_z", type=float, default=1.25, help="Maximum allowed EE target z in robot base frame.")
+parser.add_argument("--gripper_min", type=float, default=0.0)
+parser.add_argument("--gripper_max", type=float, default=0.041)
+parser.add_argument("--reject_unsafe", action="store_true", help="Reject chunks that required safety clipping instead of sending clipped commands.")
+parser.add_argument("--unsafe_report_rows", type=int, default=5, help="Rows to print from safety diagnostics.")
 args = parser.parse_args()
 
 
@@ -140,6 +147,59 @@ def _call_xvla(state: dict[str, Any]) -> np.ndarray:
     return action
 
 
+
+def _clip_xyz_sequence(action: np.ndarray, current: np.ndarray, offset: int, side: str) -> tuple[np.ndarray, list[str]]:
+    clipped = action.copy()
+    issues = []
+    prev = current[offset : offset + 3].astype(np.float32).copy()
+    for row_idx in range(clipped.shape[0]):
+        raw = clipped[row_idx, offset : offset + 3].astype(np.float32)
+        target = raw.copy()
+        target[2] = np.clip(target[2], args.min_z, args.max_z)
+        delta = target - prev
+        dist = float(np.linalg.norm(delta))
+        if dist > args.max_step_m:
+            target = prev + delta / max(dist, 1e-8) * args.max_step_m
+        if not np.allclose(target, raw, atol=1e-6):
+            issues.append(
+                f"{side}[{row_idx}] raw={raw.round(4).tolist()} safe={target.round(4).tolist()} "
+                f"from={prev.round(4).tolist()} dist={dist:.4f}"
+            )
+        clipped[row_idx, offset : offset + 3] = target
+        prev = target
+    return clipped, issues
+
+
+def _apply_safety_filter(action: np.ndarray, state: dict[str, Any]) -> tuple[np.ndarray, list[str]]:
+    current = np.asarray(state["ee6d_base"], dtype=np.float32)
+    safe = action.copy()
+    issues: list[str] = []
+    safe, left_issues = _clip_xyz_sequence(safe, current, 0, "left")
+    safe, right_issues = _clip_xyz_sequence(safe, current, 10, "right")
+    issues.extend(left_issues)
+    issues.extend(right_issues)
+
+    for grip_idx, side in [(9, "left_gripper"), (19, "right_gripper")]:
+        raw = safe[:, grip_idx].copy()
+        safe[:, grip_idx] = np.clip(safe[:, grip_idx], args.gripper_min, args.gripper_max)
+        changed = np.where(np.abs(raw - safe[:, grip_idx]) > 1e-6)[0]
+        for row_idx in changed.tolist():
+            issues.append(f"{side}[{row_idx}] raw={raw[row_idx]:.4f} safe={safe[row_idx, grip_idx]:.4f}")
+
+    return safe, issues
+
+
+def _print_action_safety(action: np.ndarray, safe_action: np.ndarray, issues: list[str]) -> None:
+    left_delta = np.linalg.norm(safe_action[:, 0:3] - action[:, 0:3], axis=1)
+    right_delta = np.linalg.norm(safe_action[:, 10:13] - action[:, 10:13], axis=1)
+    print("[bridge] safety clipped rows:", len(issues))
+    print("[bridge] max left xyz correction:", round(float(np.max(left_delta)), 4))
+    print("[bridge] max right xyz correction:", round(float(np.max(right_delta)), 4))
+    for issue in issues[: max(0, args.unsafe_report_rows)]:
+        print("[bridge] safety:", issue)
+    if len(issues) > args.unsafe_report_rows:
+        print(f"[bridge] safety: ... {len(issues) - args.unsafe_report_rows} more")
+
 def _send_action_to_brx(action: np.ndarray) -> dict[str, Any]:
     rows = action[: max(1, args.exec_rows)].astype(float).tolist()
     return _post_json(_join_url(args.brx_url, "/command/ee6d"), {"action": rows})
@@ -164,11 +224,17 @@ def run_once(cycle_idx: int) -> None:
     print("[bridge] first row left xyz/grip:", action[0, 0:3].round(4).tolist(), round(float(action[0, 9]), 4))
     print("[bridge] first row right xyz/grip:", action[0, 10:13].round(4).tolist(), round(float(action[0, 19]), 4))
 
+    safe_action, issues = _apply_safety_filter(action, state)
+    _print_action_safety(action, safe_action, issues)
+    if issues and args.reject_unsafe:
+        print("[bridge] reject_unsafe=True and safety clipping was required; not sending action to BRX.")
+        return
+
     if args.dry_run:
         print("[bridge] dry_run=True, not sending action to BRX.")
         return
 
-    response = _send_action_to_brx(action)
+    response = _send_action_to_brx(safe_action)
     print("[bridge] sent to BRX:", response)
 
 
