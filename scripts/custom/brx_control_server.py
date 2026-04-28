@@ -378,7 +378,7 @@ def _spawn_scene() -> None:
     if args_cli.no_task_scene:
         return
     sim_utils.create_prim("/World/TaskScene", "Xform")
-    table_top_z = 0.74
+    table_top_z = 0.61
     _spawn_static_cuboid("/World/TaskScene/TableTop", (0.78, 0.72, 0.055), (0.72, 0.0, table_top_z - 0.0275), (0.48, 0.42, 0.34))
     for name, dx, dy in [("LegFL", 0.31, 0.27), ("LegFR", 0.31, -0.27), ("LegBL", -0.31, 0.27), ("LegBR", -0.31, -0.27)]:
         _spawn_static_cuboid(f"/World/TaskScene/{name}", (0.045, 0.045, table_top_z), (0.72 + dx, dy, table_top_z * 0.5), (0.34, 0.30, 0.25))
