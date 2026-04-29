@@ -1,4 +1,4 @@
-# Copyright (c) 2026.
+﻿# Copyright (c) 2026.
 # SPDX-License-Identifier: BSD-3-Clause
 
 """
@@ -52,7 +52,7 @@ parser.add_argument("--left_wrist_camera_body", type=str, default="HandCam02_Lin
 parser.add_argument("--right_wrist_camera_body", type=str, default="HandCam01_Link", help="URDF camera body used by /camera/right_wrist.png.")
 parser.add_argument("--host", type=str, default="127.0.0.1")
 parser.add_argument("--port", type=int, default=8765)
-parser.add_argument("--command_hold_steps", type=int, default=1, help="Simulation steps to hold each row of a command chunk.")
+parser.add_argument("--command_hold_steps", type=int, default=3, help="Simulation steps to hold each row of a command chunk. Default 3 approximates 30 Hz with dt=0.01.")
 parser.add_argument("--joint_stiffness", type=float, default=2500.0, help="Position drive stiffness for all imported robot joints.")
 parser.add_argument("--joint_damping", type=float, default=120.0, help="Position drive damping for all imported robot joints.")
 parser.add_argument("--effort_limit", type=float, default=800.0, help="Implicit actuator effort limit.")
@@ -62,6 +62,12 @@ parser.add_argument("--camera_width", type=int, default=640)
 parser.add_argument("--camera_height", type=int, default=480)
 parser.add_argument("--default_head02", type=float, default=-0.17918, help="Initial/default Head02_Joint target in radians.")
 parser.add_argument("--default_head03", type=float, default=-0.81304, help="Initial/default Head03_Joint target in radians.")
+parser.add_argument(
+    "--camera_pose_mode",
+    choices=["link", "lookat"],
+    default="lookat",
+    help="lookat keeps a forward/down wrist view for policy testing; link matches Isaac Gym set_camera_transform(pos, quat).",
+)
 parser.add_argument(
     "--head_camera_offset",
     type=float,
@@ -482,6 +488,12 @@ def _update_camera_poses(
     left_pose = robot.data.body_state_w[0, left_wrist_camera_body_id, 0:7]
     right_pose = robot.data.body_state_w[0, right_wrist_camera_body_id, 0:7]
 
+    if args_cli.camera_pose_mode == "link":
+        positions = torch.stack([head_pose[0:3], left_pose[0:3], right_pose[0:3]], dim=0)
+        orientations = torch.stack([head_pose[3:7], left_pose[3:7], right_pose[3:7]], dim=0)
+        camera.set_world_poses(positions, orientations, convention="world")
+        return
+
     head_offset = torch.tensor(args_cli.head_camera_offset, dtype=torch.float32, device=device)
     head_forward = torch.tensor(args_cli.head_camera_forward, dtype=torch.float32, device=device)
     wrist_forward = torch.tensor(args_cli.wrist_camera_forward, dtype=torch.float32, device=device)
@@ -752,3 +764,4 @@ def main() -> None:
 if __name__ == "__main__":
     main()
     simulation_app.close()
+
