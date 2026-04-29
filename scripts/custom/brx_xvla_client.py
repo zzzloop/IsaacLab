@@ -204,6 +204,23 @@ def _print_action_safety(action: np.ndarray, safe_action: np.ndarray, issues: li
     if len(issues) > args.unsafe_report_rows:
         print(f"[bridge] safety: ... {len(issues) - args.unsafe_report_rows} more")
 
+
+def _print_action_summary(action: np.ndarray, state: dict[str, Any]) -> None:
+    current = np.asarray(state["ee6d_base"], dtype=np.float32)
+    for side, offset, grip_idx in [("left", 0, 9), ("right", 10, 19)]:
+        xyz = action[:, offset : offset + 3]
+        step = np.linalg.norm(xyz - current[offset : offset + 3], axis=1)
+        span = xyz.max(axis=0) - xyz.min(axis=0)
+        print(f"[bridge] {side} last xyz/grip:", xyz[-1].round(4).tolist(), round(float(action[-1, grip_idx]), 4))
+        print(f"[bridge] {side} xyz span:", span.round(4).tolist(), "max_dist_from_current:", round(float(step.max()), 4))
+        print(
+            f"[bridge] {side} gripper min/max:",
+            round(float(action[:, grip_idx].min()), 4),
+            "/",
+            round(float(action[:, grip_idx].max()), 4),
+        )
+
+
 def _send_action_to_brx(action: np.ndarray) -> dict[str, Any]:
     rows = action[: max(1, args.exec_rows)].astype(float).tolist()
     return _post_json(_join_url(args.brx_url, "/command/ee6d"), {"action": rows})
@@ -227,6 +244,7 @@ def run_once(cycle_idx: int) -> None:
     print("[bridge] X-VLA action shape:", tuple(action.shape))
     print("[bridge] first row left xyz/grip:", action[0, 0:3].round(4).tolist(), round(float(action[0, 9]), 4))
     print("[bridge] first row right xyz/grip:", action[0, 10:13].round(4).tolist(), round(float(action[0, 19]), 4))
+    _print_action_summary(action, state)
 
     safe_action, issues = _apply_safety_filter(action, state)
     _print_action_safety(action, safe_action, issues)
