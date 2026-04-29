@@ -1,0 +1,42 @@
+<robot name="cylinder">
+    <link name="base_link">
+        <inertial>
+            <origin xyz="0 0 0" rpy="0 0 0"/>
+            <mass value="0.1"/>
+            <!-- 圆柱体惯性矩计算：Ixx=Iyy=1/4 mr² + 1/12 mh²，Izz=1/2 mr² -->
+            <inertia ixx="0.000036" ixy="0.0" ixz="0.0" 
+                     iyy="0.000036" iyz="0.0" 
+                     izz="0.0000156"/>
+        </inertial>
+        
+        <visual>
+            <geometry>
+                <!-- 圆柱体参数：半径0.025m，高度0.05m（等效原立方体体积） -->
+                <cylinder radius="0.025" length="0.05"/>
+            </geometry>
+            <material name="cylinder_material">
+                <color rgba="0.5 0.5 1 1"/>
+            </material>
+        </visual>
+        
+        <collision>
+            <geometry>
+                <cylinder radius="0.025" length="0.05"/>
+            </geometry>
+            <surface>
+                <mu1>1.8</mu1> 
+                <mu2>1.8</mu2>
+                <friction>
+                    <ode>
+                        <mu>2</mu>
+                        <mu2>1.8</mu2>
+                    </ode>
+                </friction>
+                <restitution>
+                    <coefficient>0.1</coefficient>
+                </restitution>
+            </surface>
+        </collision>
+    </link>
+</robot>
+    

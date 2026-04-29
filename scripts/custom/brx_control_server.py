@@ -80,7 +80,7 @@ parser.add_argument(
     "--wrist_camera_forward",
     type=float,
     nargs=3,
-    default=(0.25, 0.0, 0.0),
+    default=(0.20, 0.0, -0.12),
     help="Local look-at vector for wrist cameras in their URDF camera body frames.",
 )
 AppLauncher.add_app_launcher_args(parser)
@@ -405,14 +405,14 @@ def _spawn_scene() -> None:
         return
     sim_utils.create_prim("/World/TaskScene", "Xform")
     table_top_z = 0.61
-    _spawn_static_cuboid("/World/TaskScene/TableTop", (0.78, 0.72, 0.055), (0.72, 0.0, table_top_z - 0.0275), (0.48, 0.42, 0.34))
+    _spawn_static_cuboid("/World/TaskScene/TableTop", (0.8, 0.8, 0.1), (0.80, 0.0, table_top_z - 0.05), (0.48, 0.42, 0.34))
     for name, dx, dy in [("LegFL", 0.31, 0.27), ("LegFR", 0.31, -0.27), ("LegBL", -0.31, 0.27), ("LegBR", -0.31, -0.27)]:
-        _spawn_static_cuboid(f"/World/TaskScene/{name}", (0.045, 0.045, table_top_z), (0.72 + dx, dy, table_top_z * 0.5), (0.34, 0.30, 0.25))
-    _spawn_bucket("/World/TaskScene/Bucket", (0.82, 0.0, table_top_z))
+        _spawn_static_cuboid(f"/World/TaskScene/{name}", (0.045, 0.045, table_top_z), (0.80 + dx, dy, table_top_z * 0.5), (0.34, 0.30, 0.25))
+    _spawn_bucket("/World/TaskScene/Bucket", (0.80, 0.0, table_top_z))
     cube_size = 0.06
-    cube_z = table_top_z + cube_size * 0.5 + 0.003
-    _spawn_rigid_cube("/World/TaskScene/BlockRed", cube_size, (0.56, 0.16, cube_z), (0.9, 0.12, 0.08))
-    _spawn_rigid_cube("/World/TaskScene/BlockBlue", cube_size, (0.56, -0.16, cube_z), (0.08, 0.22, 0.9))
+    cube_z = 0.70
+    _spawn_rigid_cube("/World/TaskScene/BlockRed", cube_size, (0.55, 0.0, cube_z), (0.9, 0.12, 0.08))
+    _spawn_rigid_cube("/World/TaskScene/BlockBlue", cube_size, (0.55, 0.20, cube_z), (0.08, 0.22, 0.9))
 
 
 
