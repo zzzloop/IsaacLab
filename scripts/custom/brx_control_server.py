@@ -60,6 +60,8 @@ parser.add_argument("--velocity_limit", type=float, default=60.0, help="Implicit
 parser.add_argument("--no_task_scene", action="store_true")
 parser.add_argument("--camera_width", type=int, default=640)
 parser.add_argument("--camera_height", type=int, default=480)
+parser.add_argument("--default_head02", type=float, default=-0.17918, help="Initial/default Head02_Joint target in radians.")
+parser.add_argument("--default_head03", type=float, default=-0.81304, help="Initial/default Head03_Joint target in radians.")
 parser.add_argument(
     "--head_camera_offset",
     type=float,
@@ -589,6 +591,23 @@ def _apply_joint23(robot: Articulation, row: list[float]) -> None:
     robot.set_joint_position_target(target)
 
 
+def _apply_default_head_pose(robot: Articulation) -> None:
+    """Initialize the head to the dataset-like downward view used by the global camera."""
+    names = ["Head02_Joint", "Head03_Joint"]
+    if not all(name in robot.joint_names for name in names):
+        missing = [name for name in names if name not in robot.joint_names]
+        raise RuntimeError(f"Missing head joint(s): {missing}")
+    joint_ids = [robot.joint_names.index(name) for name in names]
+    values = torch.tensor([[args_cli.default_head02, args_cli.default_head03]], dtype=torch.float32, device=robot.device)
+
+    joint_pos = robot.data.joint_pos.clone()
+    joint_vel = robot.data.joint_vel.clone()
+    joint_pos[:, joint_ids] = values
+    joint_vel[:, joint_ids] = 0.0
+    robot.write_joint_state_to_sim(joint_pos, joint_vel)
+    robot.set_joint_position_target(values, joint_ids=joint_ids)
+
+
 def _reset_joint23(robot: Articulation, row: list[float]) -> None:
     target = _joint23_to_full_tensor(robot, row)
     joint_vel = torch.zeros_like(target)
@@ -649,6 +668,7 @@ def _state_snapshot(robot: Articulation, left_ctx: ArmIkContext, right_ctx: ArmI
 
 def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -> None:
     sim_dt = sim.get_physics_dt()
+    _apply_default_head_pose(robot)
     _configure_camera_poses(camera, sim.device)
     robot.write_data_to_sim()
     sim.step()
@@ -681,6 +701,7 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
     print("[BRX] ee6d: [left_xyz, left_rot6d, left_gripper, right_xyz, right_rot6d, right_gripper], absolute base frame")
     print("[BRX] joint23: absolute joint targets in EXPECTED_MOVABLE_JOINTS order")
     print("[BRX] gripper scalar is interpreted as jaw meters and clamped to [0, 0.041]")
+    print(f"[BRX] default head joints: Head02={args_cli.default_head02:.5f}, Head03={args_cli.default_head03:.5f}")
     COMMAND_BUFFER.set_state(_state_snapshot(robot, left_ctx, right_ctx))
 
     hold_count = 0
