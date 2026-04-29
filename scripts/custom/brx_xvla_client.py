@@ -49,7 +49,11 @@ parser.add_argument("--domain_id", type=int, default=0, help="Domain id passed t
 parser.add_argument("--steps", type=int, default=30, help="Requested X-VLA action chunk length.")
 parser.add_argument("--exec_rows", type=int, default=30, help="Rows from each returned action chunk to execute.")
 parser.add_argument("--cycles", type=int, default=1, help="How many observe-predict-execute cycles to run. Use -1 for forever.")
-parser.add_argument("--rate_hz", type=float, default=2.0, help="Bridge cycle rate. BRX server handles per-row hold internally.")
+parser.add_argument("--rate_hz", type=float, default=2.0, help="Minimum bridge cycle spacing when --wait_for_chunk is disabled.")
+parser.add_argument("--sim_dt", type=float, default=0.01, help="Isaac Lab simulation dt used to estimate chunk execution time.")
+parser.add_argument("--command_hold_steps", type=int, default=3, help="BRX server hold steps per action row.")
+parser.add_argument("--wait_for_chunk", action="store_true", default=True, help="Wait for sent rows to execute before the next observe-predict cycle.")
+parser.add_argument("--no_wait_for_chunk", dest="wait_for_chunk", action="store_false", help="Do not wait for the sent action chunk to finish.")
 parser.add_argument("--timeout", type=float, default=30.0)
 parser.add_argument("--dry_run", action="store_true", help="Call X-VLA and print action shape, but do not send control to BRX.")
 parser.add_argument("--no_execute", action="store_true", help="Only print BRX state and do not call X-VLA.")
@@ -65,8 +69,8 @@ parser.add_argument("--min_z", type=float, default=0.45, help="Minimum allowed E
 parser.add_argument("--max_z", type=float, default=1.25, help="Maximum allowed EE target z in robot base frame.")
 parser.add_argument("--gripper_min", type=float, default=0.0)
 parser.add_argument("--gripper_max", type=float, default=0.041)
-parser.add_argument("--normalized_gripper", action="store_true", default=True, help="Map model gripper outputs from [0, 1] to jaw meters before sending to BRX.")
-parser.add_argument("--raw_gripper", dest="normalized_gripper", action="store_false", help="Use model gripper outputs as jaw meters directly.")
+parser.add_argument("--normalized_gripper", action="store_true", default=True, help="Map model gripper outputs from opening [0, 1] to jaw opening meters before sending to BRX.")
+parser.add_argument("--raw_gripper", dest="normalized_gripper", action="store_false", help="Use model gripper outputs as jaw opening meters directly.")
 parser.add_argument("--reject_unsafe", action="store_true", help="Reject chunks that required safety clipping instead of sending clipped commands.")
 parser.add_argument("--unsafe_report_rows", type=int, default=5, help="Rows to print from safety diagnostics.")
 args = parser.parse_args()
@@ -258,6 +262,11 @@ def run_once(cycle_idx: int) -> None:
 
     response = _send_action_to_brx(safe_action)
     print("[bridge] sent to BRX:", response)
+    if args.wait_for_chunk:
+        rows = min(max(1, args.exec_rows), safe_action.shape[0])
+        wait_s = rows * max(1, args.command_hold_steps) * args.sim_dt
+        print("[bridge] waiting for chunk execution:", round(wait_s, 3), "s")
+        time.sleep(wait_s)
 
 
 def main() -> None:
@@ -270,7 +279,8 @@ def main() -> None:
         cycle += 1
         if args.cycles >= 0 and cycle >= args.cycles:
             break
-        time.sleep(max(0.0, 1.0 / max(args.rate_hz, 1e-6)))
+        if not args.wait_for_chunk:
+            time.sleep(max(0.0, 1.0 / max(args.rate_hz, 1e-6)))
 
 
 if __name__ == "__main__":
