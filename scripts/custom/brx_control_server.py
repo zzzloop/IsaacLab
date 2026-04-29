@@ -50,7 +50,7 @@ parser.add_argument("--right_ee_body", type=str, default="LinearclampinggripperJ
 parser.add_argument("--head_camera_body", type=str, default="EyeL_Link", help="Robot body used by /camera/head.png.")
 parser.add_argument("--left_wrist_camera_body", type=str, default="HandCam02_Link", help="URDF camera body used by /camera/left_wrist.png.")
 parser.add_argument("--right_wrist_camera_body", type=str, default="HandCam01_Link", help="URDF camera body used by /camera/right_wrist.png.")
-parser.add_argument("--host", type=str, default="127.0.0.1")
+parser.add_argument("--host", type=str, default="0.0.0.0")
 parser.add_argument("--port", type=int, default=8765)
 parser.add_argument("--command_hold_steps", type=int, default=3, help="Simulation steps to hold each row of a command chunk. Default 3 approximates 30 Hz with dt=0.01.")
 parser.add_argument("--joint_stiffness", type=float, default=2500.0, help="Position drive stiffness for all imported robot joints.")
