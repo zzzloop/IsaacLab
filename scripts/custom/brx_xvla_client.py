@@ -246,9 +246,19 @@ def _wait_for_brx_chunk(response: dict[str, Any], rows_sent: int) -> None:
     while time.monotonic() < deadline:
         state = _get_brx_state()
         last_state = state
-        if state.get("command_version") != version:
-            print("[bridge] command was superseded while waiting:", state.get("command_version"), "!=", version)
-            return
+        state_version = state.get("command_version")
+        if state_version is not None:
+            state_version = int(state_version)
+            # /state is updated from the simulation loop, so immediately after
+            # POST /command it can lag behind the accepted command version by a
+            # frame.  That is not a supersede; only a newer version means some
+            # other command replaced the chunk we are waiting on.
+            if state_version < int(version):
+                time.sleep(max(args.wait_poll_s, 0.001))
+                continue
+            if state_version > int(version):
+                print("[bridge] command was superseded while waiting:", state_version, ">", version)
+                return
         remaining = int(state.get("command_rows_remaining", 0))
         consumed = int(state.get("command_rows_consumed", 0))
         if remaining <= 0 and consumed >= rows_sent:
