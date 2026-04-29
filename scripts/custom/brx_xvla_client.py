@@ -66,6 +66,12 @@ parser.add_argument("--image2", type=str, default=None, help="Path to image2. If
 parser.add_argument("--image0_url", type=str, default=None, help="HTTP endpoint returning image0 bytes.")
 parser.add_argument("--image1_url", type=str, default=None, help="HTTP endpoint returning image1 bytes.")
 parser.add_argument("--image2_url", type=str, default=None, help="HTTP endpoint returning image2 bytes.")
+parser.add_argument(
+    "--xyz_mode",
+    choices=("delta", "absolute"),
+    default="delta",
+    help="Interpret X-VLA xyz outputs as delta-from-current or absolute EE targets. New BRX training uses delta.",
+)
 parser.add_argument("--max_step_m", type=float, default=0.03, help="Max allowed xyz movement per action row, relative to previous target/current state.")
 parser.add_argument("--min_z", type=float, default=0.45, help="Minimum allowed EE target z in robot base frame.")
 parser.add_argument("--max_z", type=float, default=1.25, help="Maximum allowed EE target z in robot base frame.")
@@ -153,6 +159,18 @@ def _call_xvla(state: dict[str, Any]) -> np.ndarray:
     if not np.all(np.isfinite(action)):
         raise RuntimeError("X-VLA action contains NaN or Inf")
     return action
+
+
+def _model_action_to_ee6d(action: np.ndarray, state: dict[str, Any]) -> np.ndarray:
+    """Convert model output into absolute ee6d targets expected by /command/ee6d."""
+    if args.xyz_mode == "absolute":
+        return action
+
+    current = np.asarray(state["ee6d_base"], dtype=np.float32)
+    converted = action.copy()
+    converted[:, 0:3] += current[0:3]
+    converted[:, 10:13] += current[10:13]
+    return converted
 
 
 
@@ -313,8 +331,13 @@ def run_once(cycle_idx: int) -> None:
     if args.no_execute:
         return
 
-    action = _call_xvla(state)
-    print("[bridge] X-VLA action shape:", tuple(action.shape))
+    model_action = _call_xvla(state)
+    print("[bridge] X-VLA action shape:", tuple(model_action.shape), "xyz_mode:", args.xyz_mode)
+    if args.xyz_mode == "delta":
+        print("[bridge] first row left xyz_delta/grip:", model_action[0, 0:3].round(4).tolist(), round(float(model_action[0, 9]), 4))
+        print("[bridge] first row right xyz_delta/grip:", model_action[0, 10:13].round(4).tolist(), round(float(model_action[0, 19]), 4))
+
+    action = _model_action_to_ee6d(model_action, state)
     print("[bridge] first row left xyz/grip:", action[0, 0:3].round(4).tolist(), round(float(action[0, 9]), 4))
     print("[bridge] first row right xyz/grip:", action[0, 10:13].round(4).tolist(), round(float(action[0, 19]), 4))
     _print_action_summary(action, state)
