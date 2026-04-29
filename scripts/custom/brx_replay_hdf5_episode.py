@@ -172,9 +172,9 @@ def rotmat_to_6d(rot: np.ndarray) -> np.ndarray:
 
 
 def gripper_opening01(q: np.ndarray, pos_idx: int, neg_idx: int) -> float:
-    # URDF jaw pair is approximately [0, 0.041] and [-0.041, 0], so total opening is 0.082 m.
-    opening = (float(q[pos_idx]) - float(q[neg_idx])) / (2.0 * DEFAULT_GRIPPER_MAX_M)
-    return float(np.clip(opening, 0.0, 1.0))
+    # New BRX042501 data uses same-signed equal JawBlock values for each gripper.
+    opening_m = 0.5 * (abs(float(q[pos_idx])) + abs(float(q[neg_idx])))
+    return float(np.clip(opening_m / DEFAULT_GRIPPER_MAX_M, 0.0, 1.0))
 
 
 def joint23_to_ee6d(q: np.ndarray, fk: SimpleURDFFK, config: ReplayConfig) -> np.ndarray:

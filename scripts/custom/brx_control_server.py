@@ -574,7 +574,8 @@ def _apply_gripper_targets(robot: Articulation, left_grip: float, right_grip: fl
     if not all(name in robot.joint_names for name in names):
         return
     joint_ids = [robot.joint_names.index(name) for name in names]
-    targets = torch.tensor([[right, -right, left, -left]], device=robot.device)
+    # BRX042501 JawBlock pairs use same-signed targets in the ACT/Isaac Gym data.
+    targets = torch.tensor([[right, right, left, left]], device=robot.device)
     robot.set_joint_position_target(targets, joint_ids=joint_ids)
 
 
