@@ -54,6 +54,8 @@ parser.add_argument("--sim_dt", type=float, default=0.01, help="Isaac Lab simula
 parser.add_argument("--command_hold_steps", type=int, default=3, help="BRX server hold steps per action row.")
 parser.add_argument("--wait_for_chunk", action="store_true", default=True, help="Wait for sent rows to execute before the next observe-predict cycle.")
 parser.add_argument("--no_wait_for_chunk", dest="wait_for_chunk", action="store_false", help="Do not wait for the sent action chunk to finish.")
+parser.add_argument("--wait_poll_s", type=float, default=0.05, help="Polling interval while waiting for BRX to consume a command chunk.")
+parser.add_argument("--wait_timeout_s", type=float, default=10.0, help="Maximum wait time for one command chunk to drain.")
 parser.add_argument("--timeout", type=float, default=30.0)
 parser.add_argument("--dry_run", action="store_true", help="Call X-VLA and print action shape, but do not send control to BRX.")
 parser.add_argument("--no_execute", action="store_true", help="Only print BRX state and do not call X-VLA.")
@@ -230,11 +232,68 @@ def _send_action_to_brx(action: np.ndarray) -> dict[str, Any]:
     return _post_json(_join_url(args.brx_url, "/command/ee6d"), {"action": rows})
 
 
+def _wait_for_brx_chunk(response: dict[str, Any], rows_sent: int) -> None:
+    version = response.get("version")
+    if version is None:
+        wait_s = rows_sent * max(1, args.command_hold_steps) * args.sim_dt
+        print("[bridge] waiting fixed duration because response has no version:", round(wait_s, 3), "s")
+        time.sleep(wait_s)
+        return
+
+    deadline = time.monotonic() + max(args.wait_timeout_s, args.wait_poll_s)
+    start_t = time.monotonic()
+    last_state: dict[str, Any] | None = None
+    while time.monotonic() < deadline:
+        state = _get_brx_state()
+        last_state = state
+        if state.get("command_version") != version:
+            print("[bridge] command was superseded while waiting:", state.get("command_version"), "!=", version)
+            return
+        remaining = int(state.get("command_rows_remaining", 0))
+        consumed = int(state.get("command_rows_consumed", 0))
+        if remaining <= 0 and consumed >= rows_sent:
+            elapsed = max(time.monotonic() - start_t, 1e-6)
+            print(
+                "[bridge] chunk drained:",
+                {
+                    "version": version,
+                    "consumed": consumed,
+                    "remaining": remaining,
+                    "wall_s": round(elapsed, 3),
+                    "rows_per_s": round(consumed / elapsed, 2),
+                },
+            )
+            return
+        time.sleep(max(args.wait_poll_s, 0.001))
+
+    if last_state is None:
+        print("[bridge] wait timeout before reading BRX state")
+    else:
+        print(
+            "[bridge] wait timeout:",
+            {
+                "version": version,
+                "state_version": last_state.get("command_version"),
+                "consumed": last_state.get("command_rows_consumed"),
+                "remaining": last_state.get("command_rows_remaining"),
+            },
+        )
+
+
 def _print_state_summary(state: dict[str, Any]) -> None:
     ee6d = np.asarray(state["ee6d_base"], dtype=np.float32)
     print("[bridge] BRX mode:", state.get("mode"))
     print("[bridge] left xyz/grip:", ee6d[0:3].round(4).tolist(), round(float(ee6d[9]), 4))
     print("[bridge] right xyz/grip:", ee6d[10:13].round(4).tolist(), round(float(ee6d[19]), 4))
+    if "command_rows_remaining" in state:
+        print(
+            "[bridge] command queue:",
+            {
+                "version": state.get("command_version"),
+                "consumed": state.get("command_rows_consumed"),
+                "remaining": state.get("command_rows_remaining"),
+            },
+        )
 
 
 def run_once(cycle_idx: int) -> None:
@@ -264,9 +323,8 @@ def run_once(cycle_idx: int) -> None:
     print("[bridge] sent to BRX:", response)
     if args.wait_for_chunk:
         rows = min(max(1, args.exec_rows), safe_action.shape[0])
-        wait_s = rows * max(1, args.command_hold_steps) * args.sim_dt
-        print("[bridge] waiting for chunk execution:", round(wait_s, 3), "s")
-        time.sleep(wait_s)
+        print("[bridge] waiting for BRX to consume rows:", rows)
+        _wait_for_brx_chunk(response, rows)
 
 
 def main() -> None:

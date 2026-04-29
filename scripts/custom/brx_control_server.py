@@ -158,6 +158,8 @@ class CommandBuffer:
         self.queue: list[list[float]] = []
         self.last: list[float] | None = None
         self.version = 0
+        self.rows_total = 0
+        self.rows_consumed = 0
         self.state: dict[str, Any] = {"ready": False}
 
     def set_command(self, mode: str, rows: list[list[float]]) -> int:
@@ -166,6 +168,8 @@ class CommandBuffer:
             self.queue = [list(row) for row in rows]
             self.last = None
             self.version += 1
+            self.rows_total = len(rows)
+            self.rows_consumed = 0
             return self.version
 
     def next_row(self) -> tuple[str | None, list[float] | None, int]:
@@ -174,7 +178,18 @@ class CommandBuffer:
                 return None, None, self.version
             if self.queue:
                 self.last = self.queue.pop(0)
+                self.rows_consumed += 1
             return self.mode, self.last, self.version
+
+    def command_status(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "command_version": self.version,
+                "command_mode": self.mode,
+                "command_rows_total": self.rows_total,
+                "command_rows_consumed": self.rows_consumed,
+                "command_rows_remaining": len(self.queue),
+            }
 
     def get_state(self) -> dict[str, Any]:
         with self._lock:
@@ -667,7 +682,7 @@ def _state_snapshot(robot: Articulation, left_ctx: ArmIkContext, right_ctx: ArmI
     left_ee10_base = left_pos_b[0].detach().cpu().tolist() + _quat_to_rot6d(left_quat_b[0]) + [left_grip]
     right_ee10_base = right_pos_b[0].detach().cpu().tolist() + _quat_to_rot6d(right_quat_b[0]) + [right_grip]
 
-    return {
+    state = {
         "ready": True,
         "mode": COMMAND_BUFFER.mode,
         "qpos23": qpos23,
@@ -677,6 +692,8 @@ def _state_snapshot(robot: Articulation, left_ctx: ArmIkContext, right_ctx: ArmI
         "left_ee_world": left_pose_w.detach().cpu().tolist(),
         "right_ee_world": right_pose_w.detach().cpu().tolist(),
     }
+    state.update(COMMAND_BUFFER.command_status())
+    return state
 
 
 def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -> None:
