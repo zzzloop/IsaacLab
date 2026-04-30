@@ -468,7 +468,7 @@ def _random_block_layout() -> list[tuple[str, tuple[float, float, float], tuple[
 def _spawn_scene() -> None:
     ground = sim_utils.GroundPlaneCfg(
         color=(0.5, 0.5, 0.5),
-        size=(8.0, 8.0),
+        size=(100.0, 100.0),
         physics_material=sim_utils.RigidBodyMaterialCfg(static_friction=0.2, dynamic_friction=0.2, restitution=0.0),
     )
     ground.func("/World/defaultGroundPlane", ground)
