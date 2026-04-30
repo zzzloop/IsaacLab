@@ -53,6 +53,7 @@ parser.add_argument("--left_wrist_camera_body", type=str, default="HandCam02_Lin
 parser.add_argument("--right_wrist_camera_body", type=str, default="HandCam01_Link", help="URDF camera body used by /camera/right_wrist.png.")
 parser.add_argument("--host", type=str, default="0.0.0.0")
 parser.add_argument("--port", type=int, default=8765)
+parser.add_argument("--teleop_assets_root", type=str, default="teleop/assets", help="Isaac Gym teleop assets root used to mirror the data-collection scene.")
 parser.add_argument("--command_hold_steps", type=int, default=3, help="Simulation steps to hold each row of a command chunk. Default 3 approximates 30 Hz with dt=0.01.")
 parser.add_argument("--joint_stiffness", type=float, default=2500.0, help="Position drive stiffness for all imported robot joints.")
 parser.add_argument("--joint_damping", type=float, default=120.0, help="Position drive damping for all imported robot joints.")
@@ -62,7 +63,7 @@ parser.add_argument("--no_task_scene", action="store_true")
 parser.add_argument("--fixed_blocks", dest="randomize_blocks", action="store_false", help="Disable startup randomization for block colors and positions.")
 parser.add_argument("--block_seed", type=int, default=None, help="Optional seed for repeatable randomized block placement.")
 parser.add_argument("--camera_width", type=int, default=320)
-parser.add_argument("--camera_height", type=int, default=240)
+parser.add_argument("--camera_height", type=int, default=180)
 parser.add_argument(
     "--camera_update_every",
     type=int,
@@ -74,8 +75,8 @@ parser.add_argument("--default_head03", type=float, default=-0.81304, help="Init
 parser.add_argument(
     "--camera_pose_mode",
     choices=["link", "lookat"],
-    default="lookat",
-    help="lookat keeps a forward/down wrist view for policy testing; link matches Isaac Gym set_camera_transform(pos, quat).",
+    default="link",
+    help="link matches Isaac Gym set_camera_transform(pos, quat); lookat keeps a forward/down wrist view for policy debugging.",
 )
 parser.add_argument(
     "--head_camera_offset",
@@ -235,6 +236,13 @@ CAMERA_BUFFER = CameraBuffer()
 
 def _abs_path(path: str) -> str:
     return os.path.abspath(os.path.expanduser(path))
+
+
+def _asset_path(*parts: str) -> str:
+    root = args_cli.teleop_assets_root
+    if not os.path.isabs(root):
+        root = os.path.join(os.getcwd(), root)
+    return _abs_path(os.path.join(root, *parts))
 
 
 def _rows_from_payload(payload: dict[str, Any], key: str, width: int) -> list[list[float]]:
@@ -421,26 +429,31 @@ def _spawn_bucket(prefix: str, center: tuple[float, float, float]) -> None:
     _spawn_static_cuboid(f"{prefix}/WallNegY", (outer, wall_t, height), (x, y - outer * 0.5, wall_z), color)
 
 
+def _spawn_teleop_bucket(path: str, pos: tuple[float, float, float]) -> None:
+    bucket_urdf = _asset_path("bucket", "bucket.urdf")
+    if os.path.exists(bucket_urdf):
+        cfg = sim_utils.UrdfFileCfg(
+            asset_path=bucket_urdf,
+            fix_base=True,
+            visual_material=_make_material((0.7, 0.7, 1.0)),
+        )
+        cfg.func(path, cfg, translation=pos)
+    else:
+        print(f"[BRX] teleop bucket asset not found, using cuboid fallback: {bucket_urdf}")
+        _spawn_bucket(path, (pos[0], pos[1], pos[2]))
+
+
 def _random_block_layout() -> list[tuple[str, tuple[float, float, float], tuple[float, float, float]]]:
     rng = random.Random(args_cli.block_seed)
-    palette = [
-        (0.90, 0.12, 0.08),
-        (0.08, 0.22, 0.90),
-        (0.08, 0.70, 0.24),
-        (0.95, 0.65, 0.08),
-        (0.65, 0.18, 0.88),
-        (0.05, 0.75, 0.78),
+    colors = [(rng.random(), rng.random(), rng.random()), (rng.random(), rng.random(), rng.random())]
+    # Isaac Gym collection scene:
+    # cube1: x=-0.55+U(-0.1,0.1), y=0+U(-0.05,0.05), z=2.3
+    # cube2: x=-0.55+U(-0.1,0.1), y=0.2+U(-0.05,0.05), z=2.3
+    # Robot is spawned at x=-1.1,z=1.6, so these become x=0.55+..., z=0.70 in robot/base frame.
+    positions = [
+        (0.55 + rng.uniform(-0.10, 0.10), rng.uniform(-0.05, 0.05), 0.70),
+        (0.55 + rng.uniform(-0.10, 0.10), 0.20 + rng.uniform(-0.05, 0.05), 0.70),
     ]
-    colors = rng.sample(palette, 2)
-    positions: list[tuple[float, float, float]] = []
-    for _ in range(2):
-        for _attempt in range(100):
-            pos = (rng.uniform(0.50, 0.64), rng.uniform(-0.18, 0.22), 0.70)
-            if all(((pos[0] - old[0]) ** 2 + (pos[1] - old[1]) ** 2) ** 0.5 >= 0.11 for old in positions):
-                positions.append(pos)
-                break
-        else:
-            positions.append((0.55, 0.0 if not positions else 0.20, 0.70))
     return [
         ("BlockA", positions[0], colors[0]),
         ("BlockB", positions[1], colors[1]),
@@ -461,17 +474,15 @@ def _spawn_scene() -> None:
         return
     sim_utils.create_prim("/World/TaskScene", "Xform")
     table_top_z = 0.61
-    _spawn_static_cuboid("/World/TaskScene/TableTop", (0.8, 0.8, 0.1), (0.80, 0.0, table_top_z - 0.05), (0.48, 0.42, 0.34))
-    for name, dx, dy in [("LegFL", 0.31, 0.27), ("LegFR", 0.31, -0.27), ("LegBL", -0.31, 0.27), ("LegBR", -0.31, -0.27)]:
-        _spawn_static_cuboid(f"/World/TaskScene/{name}", (0.045, 0.045, table_top_z), (0.80 + dx, dy, table_top_z * 0.5), (0.34, 0.30, 0.25))
-    _spawn_bucket("/World/TaskScene/Bucket", (0.80, 0.0, table_top_z))
-    cube_size = 0.06
+    _spawn_static_cuboid("/World/TaskScene/TableTop", (0.8, 0.8, 0.1), (0.80, 0.0, table_top_z - 0.05), (0.5, 0.5, 0.5))
+    _spawn_teleop_bucket("/World/TaskScene/Bucket", (0.80, 0.0, 0.60))
+    cube_size = 0.05
     if args_cli.randomize_blocks:
         blocks = _random_block_layout()
     else:
         blocks = [
-            ("BlockRed", (0.55, 0.0, 0.70), (0.9, 0.12, 0.08)),
-            ("BlockBlue", (0.55, 0.20, 0.70), (0.08, 0.22, 0.9)),
+            ("BlockA", (0.55, 0.0, 0.70), (1.0, 0.5, 0.5)),
+            ("BlockB", (0.55, 0.20, 0.70), (1.0, 0.5, 0.5)),
         ]
     for name, pos, color in blocks:
         _spawn_rigid_cube(f"/World/TaskScene/{name}", cube_size, pos, color)
@@ -492,7 +503,7 @@ def _make_cameras() -> Camera:
         width=args_cli.camera_width,
         data_types=["rgb"],
         spawn=sim_utils.PinholeCameraCfg(
-            focal_length=18.0,
+            focal_length=12.0,
             focus_distance=2.0,
             horizontal_aperture=24.0,
             clipping_range=(0.05, 20.0),
