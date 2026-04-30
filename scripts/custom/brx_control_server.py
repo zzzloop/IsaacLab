@@ -436,6 +436,11 @@ def _spawn_teleop_bucket(path: str, pos: tuple[float, float, float]) -> None:
             asset_path=bucket_urdf,
             fix_base=True,
             visual_material=_make_material((0.7, 0.7, 1.0)),
+            joint_drive=UrdfConverterCfg.JointDriveCfg(
+                gains=UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=0.0, damping=0.0),
+                target_type="position",
+                drive_type="force",
+            ),
         )
         cfg.func(path, cfg, translation=pos)
     else:
