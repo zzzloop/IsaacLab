@@ -31,6 +31,7 @@ import argparse
 import json
 import os
 import io
+import random
 import threading
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -58,6 +59,8 @@ parser.add_argument("--joint_damping", type=float, default=120.0, help="Position
 parser.add_argument("--effort_limit", type=float, default=800.0, help="Implicit actuator effort limit.")
 parser.add_argument("--velocity_limit", type=float, default=60.0, help="Implicit actuator velocity limit.")
 parser.add_argument("--no_task_scene", action="store_true")
+parser.add_argument("--fixed_blocks", dest="randomize_blocks", action="store_false", help="Disable startup randomization for block colors and positions.")
+parser.add_argument("--block_seed", type=int, default=None, help="Optional seed for repeatable randomized block placement.")
 parser.add_argument("--camera_width", type=int, default=320)
 parser.add_argument("--camera_height", type=int, default=240)
 parser.add_argument(
@@ -418,6 +421,32 @@ def _spawn_bucket(prefix: str, center: tuple[float, float, float]) -> None:
     _spawn_static_cuboid(f"{prefix}/WallNegY", (outer, wall_t, height), (x, y - outer * 0.5, wall_z), color)
 
 
+def _random_block_layout() -> list[tuple[str, tuple[float, float, float], tuple[float, float, float]]]:
+    rng = random.Random(args_cli.block_seed)
+    palette = [
+        (0.90, 0.12, 0.08),
+        (0.08, 0.22, 0.90),
+        (0.08, 0.70, 0.24),
+        (0.95, 0.65, 0.08),
+        (0.65, 0.18, 0.88),
+        (0.05, 0.75, 0.78),
+    ]
+    colors = rng.sample(palette, 2)
+    positions: list[tuple[float, float, float]] = []
+    for _ in range(2):
+        for _attempt in range(100):
+            pos = (rng.uniform(0.50, 0.64), rng.uniform(-0.18, 0.22), 0.70)
+            if all(((pos[0] - old[0]) ** 2 + (pos[1] - old[1]) ** 2) ** 0.5 >= 0.11 for old in positions):
+                positions.append(pos)
+                break
+        else:
+            positions.append((0.55, 0.0 if not positions else 0.20, 0.70))
+    return [
+        ("BlockA", positions[0], colors[0]),
+        ("BlockB", positions[1], colors[1]),
+    ]
+
+
 def _spawn_scene() -> None:
     ground = sim_utils.GroundPlaneCfg(
         color=(0.72, 0.76, 0.76),
@@ -437,9 +466,16 @@ def _spawn_scene() -> None:
         _spawn_static_cuboid(f"/World/TaskScene/{name}", (0.045, 0.045, table_top_z), (0.80 + dx, dy, table_top_z * 0.5), (0.34, 0.30, 0.25))
     _spawn_bucket("/World/TaskScene/Bucket", (0.80, 0.0, table_top_z))
     cube_size = 0.06
-    cube_z = 0.70
-    _spawn_rigid_cube("/World/TaskScene/BlockRed", cube_size, (0.55, 0.0, cube_z), (0.9, 0.12, 0.08))
-    _spawn_rigid_cube("/World/TaskScene/BlockBlue", cube_size, (0.55, 0.20, cube_z), (0.08, 0.22, 0.9))
+    if args_cli.randomize_blocks:
+        blocks = _random_block_layout()
+    else:
+        blocks = [
+            ("BlockRed", (0.55, 0.0, 0.70), (0.9, 0.12, 0.08)),
+            ("BlockBlue", (0.55, 0.20, 0.70), (0.08, 0.22, 0.9)),
+        ]
+    for name, pos, color in blocks:
+        _spawn_rigid_cube(f"/World/TaskScene/{name}", cube_size, pos, color)
+        print(f"[BRX] spawned {name}: pos={tuple(round(v, 4) for v in pos)}, color={tuple(round(v, 3) for v in color)}")
 
 
 
