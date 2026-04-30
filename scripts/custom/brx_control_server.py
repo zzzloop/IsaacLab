@@ -54,6 +54,7 @@ parser.add_argument("--right_wrist_camera_body", type=str, default="HandCam01_Li
 parser.add_argument("--host", type=str, default="0.0.0.0")
 parser.add_argument("--port", type=int, default=8765)
 parser.add_argument("--teleop_assets_root", type=str, default="teleop/assets", help="Isaac Gym teleop assets root used to mirror the data-collection scene.")
+parser.add_argument("--sim_dt", type=float, default=1.0 / 30.0, help="Simulation dt. Isaac Gym data collection used 1/30 s.")
 parser.add_argument("--command_hold_steps", type=int, default=3, help="Simulation steps to hold each row of a command chunk. Default 3 approximates 30 Hz with dt=0.01.")
 parser.add_argument("--joint_stiffness", type=float, default=2500.0, help="Position drive stiffness for all imported robot joints.")
 parser.add_argument("--joint_damping", type=float, default=120.0, help="Position drive damping for all imported robot joints.")
@@ -62,12 +63,12 @@ parser.add_argument("--velocity_limit", type=float, default=60.0, help="Implicit
 parser.add_argument("--no_task_scene", action="store_true")
 parser.add_argument("--fixed_blocks", dest="randomize_blocks", action="store_false", help="Disable startup randomization for block colors and positions.")
 parser.add_argument("--block_seed", type=int, default=None, help="Optional seed for repeatable randomized block placement.")
-parser.add_argument("--camera_width", type=int, default=320)
-parser.add_argument("--camera_height", type=int, default=180)
+parser.add_argument("--camera_width", type=int, default=640)
+parser.add_argument("--camera_height", type=int, default=360)
 parser.add_argument(
     "--camera_update_every",
     type=int,
-    default=3,
+    default=1,
     help="Update/render camera frames every N simulation steps. Physics/control still runs every step.",
 )
 parser.add_argument("--default_head02", type=float, default=-0.17918, help="Initial/default Head02_Joint target in radians.")
@@ -370,7 +371,9 @@ def _make_robot_cfg() -> ArticulationCfg:
                 solver_velocity_iteration_count=0,
             ),
         ),
-        init_state=ArticulationCfg.InitialStateCfg(pos=(0.0, 0.0, 0.0)),
+        # Isaac Gym data collection spawned the robot at (-1.1, 0, 1.6).
+        # Keeping the same world pose makes camera/world renderings match the dataset scene.
+        init_state=ArticulationCfg.InitialStateCfg(pos=(-1.1, 0.0, 1.6)),
         actuators={
             "all_joints": ImplicitActuatorCfg(
                 joint_names_expr=[".*"],
@@ -396,9 +399,9 @@ def _spawn_rigid_cube(path: str, size: float, pos: tuple[float, float, float], c
     cfg = sim_utils.CuboidCfg(
         size=(size, size, size),
         rigid_props=sim_utils.RigidBodyPropertiesCfg(solver_position_iteration_count=8, solver_velocity_iteration_count=0),
-        mass_props=sim_utils.MassPropertiesCfg(mass=0.05),
+        mass_props=sim_utils.MassPropertiesCfg(mass=0.1),
         collision_props=sim_utils.CollisionPropertiesCfg(),
-        physics_material=sim_utils.RigidBodyMaterialCfg(static_friction=0.8, dynamic_friction=0.6, restitution=0.0),
+        physics_material=sim_utils.RigidBodyMaterialCfg(static_friction=1.0, dynamic_friction=1.0, restitution=0.1),
         visual_material=_make_material(color),
     )
     cfg.func(path, cfg, translation=pos)
@@ -451,13 +454,10 @@ def _spawn_teleop_bucket(path: str, pos: tuple[float, float, float]) -> None:
 def _random_block_layout() -> list[tuple[str, tuple[float, float, float], tuple[float, float, float]]]:
     rng = random.Random(args_cli.block_seed)
     colors = [(rng.random(), rng.random(), rng.random()), (rng.random(), rng.random(), rng.random())]
-    # Isaac Gym collection scene:
-    # cube1: x=-0.55+U(-0.1,0.1), y=0+U(-0.05,0.05), z=2.3
-    # cube2: x=-0.55+U(-0.1,0.1), y=0.2+U(-0.05,0.05), z=2.3
-    # Robot is spawned at x=-1.1,z=1.6, so these become x=0.55+..., z=0.70 in robot/base frame.
+    # Isaac Gym collection scene, in world coordinates.
     positions = [
-        (0.55 + rng.uniform(-0.10, 0.10), rng.uniform(-0.05, 0.05), 0.70),
-        (0.55 + rng.uniform(-0.10, 0.10), 0.20 + rng.uniform(-0.05, 0.05), 0.70),
+        (-0.55 + rng.uniform(-0.10, 0.10), rng.uniform(-0.05, 0.05), 2.30),
+        (-0.55 + rng.uniform(-0.10, 0.10), 0.20 + rng.uniform(-0.05, 0.05), 2.30),
     ]
     return [
         ("BlockA", positions[0], colors[0]),
@@ -467,27 +467,26 @@ def _random_block_layout() -> list[tuple[str, tuple[float, float, float], tuple[
 
 def _spawn_scene() -> None:
     ground = sim_utils.GroundPlaneCfg(
-        color=(0.72, 0.76, 0.76),
+        color=(0.5, 0.5, 0.5),
         size=(8.0, 8.0),
-        physics_material=sim_utils.RigidBodyMaterialCfg(static_friction=1.0, dynamic_friction=0.9, restitution=0.0),
+        physics_material=sim_utils.RigidBodyMaterialCfg(static_friction=0.2, dynamic_friction=0.2, restitution=0.0),
     )
     ground.func("/World/defaultGroundPlane", ground)
-    _spawn_floor_visuals()
-    light = sim_utils.DomeLightCfg(intensity=3000.0, color=(0.9, 0.9, 0.9))
+    # Isaac Gym collection used the default ground and did not add decorative floor geometry.
+    light = sim_utils.DomeLightCfg(intensity=1000.0, color=(1.0, 1.0, 1.0))
     light.func("/World/Light", light)
     if args_cli.no_task_scene:
         return
     sim_utils.create_prim("/World/TaskScene", "Xform")
-    table_top_z = 0.61
-    _spawn_static_cuboid("/World/TaskScene/TableTop", (0.8, 0.8, 0.1), (0.80, 0.0, table_top_z - 0.05), (0.5, 0.5, 0.5))
-    _spawn_teleop_bucket("/World/TaskScene/Bucket", (0.80, 0.0, 0.60))
+    _spawn_static_cuboid("/World/TaskScene/TableTop", (0.8, 0.8, 0.1), (-0.30, 0.0, 2.15), (0.5, 0.5, 0.5))
+    _spawn_teleop_bucket("/World/TaskScene/Bucket", (-0.30, 0.0, 2.20))
     cube_size = 0.05
     if args_cli.randomize_blocks:
         blocks = _random_block_layout()
     else:
         blocks = [
-            ("BlockA", (0.55, 0.0, 0.70), (1.0, 0.5, 0.5)),
-            ("BlockB", (0.55, 0.20, 0.70), (1.0, 0.5, 0.5)),
+            ("BlockA", (-0.55, 0.0, 2.30), (1.0, 0.5, 0.5)),
+            ("BlockB", (-0.55, 0.20, 2.30), (1.0, 0.5, 0.5)),
         ]
     for name, pos, color in blocks:
         _spawn_rigid_cube(f"/World/TaskScene/{name}", cube_size, pos, color)
@@ -825,9 +824,9 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
 
 
 def main() -> None:
-    sim_cfg = sim_utils.SimulationCfg(dt=0.01, device=args_cli.device)
+    sim_cfg = sim_utils.SimulationCfg(dt=args_cli.sim_dt, device=args_cli.device)
     sim = SimulationContext(sim_cfg)
-    sim.set_camera_view([2.5, -2.5, 2.0], [0.5, 0.0, 0.5])
+    sim.set_camera_view([1.0, 1.0, 2.0], [0.0, 0.0, 1.0])
     _spawn_scene()
     camera = _make_cameras()
     robot = Articulation(cfg=_make_robot_cfg())
