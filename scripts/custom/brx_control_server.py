@@ -58,8 +58,14 @@ parser.add_argument("--joint_damping", type=float, default=120.0, help="Position
 parser.add_argument("--effort_limit", type=float, default=800.0, help="Implicit actuator effort limit.")
 parser.add_argument("--velocity_limit", type=float, default=60.0, help="Implicit actuator velocity limit.")
 parser.add_argument("--no_task_scene", action="store_true")
-parser.add_argument("--camera_width", type=int, default=640)
-parser.add_argument("--camera_height", type=int, default=480)
+parser.add_argument("--camera_width", type=int, default=320)
+parser.add_argument("--camera_height", type=int, default=240)
+parser.add_argument(
+    "--camera_update_every",
+    type=int,
+    default=3,
+    help="Update/render camera frames every N simulation steps. Physics/control still runs every step.",
+)
 parser.add_argument("--default_head02", type=float, default=-0.17918, help="Initial/default Head02_Joint target in radians.")
 parser.add_argument("--default_head03", type=float, default=-0.81304, help="Initial/default Head03_Joint target in radians.")
 parser.add_argument(
@@ -724,7 +730,8 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
     print(f"[BRX] left wrist camera body: {args_cli.left_wrist_camera_body} -> body_index={left_wrist_camera_body_id}")
     print(f"[BRX] right wrist camera body: {args_cli.right_wrist_camera_body} -> body_index={right_wrist_camera_body_id}")
     _update_camera_poses(camera, robot, head_body_id, left_wrist_camera_body_id, right_wrist_camera_body_id, sim.device)
-    camera.update(sim_dt)
+    camera_update_every = max(1, args_cli.camera_update_every)
+    camera.update(sim_dt * camera_update_every)
     _update_camera_cache(camera)
 
     print("[BRX] Control conventions:")
@@ -735,6 +742,7 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
     COMMAND_BUFFER.set_state(_state_snapshot(robot, left_ctx, right_ctx))
 
     hold_count = 0
+    step_count = 0
     current_mode: str | None = None
     current_row: list[float] | None = None
     while simulation_app.is_running():
@@ -756,9 +764,11 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
         robot.write_data_to_sim()
         sim.step()
         robot.update(sim_dt)
-        _update_camera_poses(camera, robot, head_body_id, left_wrist_camera_body_id, right_wrist_camera_body_id, sim.device)
-        camera.update(sim_dt)
-        _update_camera_cache(camera)
+        step_count += 1
+        if step_count % camera_update_every == 0:
+            _update_camera_poses(camera, robot, head_body_id, left_wrist_camera_body_id, right_wrist_camera_body_id, sim.device)
+            camera.update(sim_dt * camera_update_every)
+            _update_camera_cache(camera)
         COMMAND_BUFFER.set_state(_state_snapshot(robot, left_ctx, right_ctx))
 
 
@@ -781,4 +791,3 @@ def main() -> None:
 if __name__ == "__main__":
     main()
     simulation_app.close()
-
