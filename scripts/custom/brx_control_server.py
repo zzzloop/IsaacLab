@@ -33,8 +33,10 @@ import os
 import io
 import random
 import threading
+import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 
 from isaaclab.app import AppLauncher
@@ -73,6 +75,16 @@ parser.add_argument(
 )
 parser.add_argument("--default_head02", type=float, default=-0.17918, help="Initial/default Head02_Joint target in radians.")
 parser.add_argument("--default_head03", type=float, default=-0.81304, help="Initial/default Head03_Joint target in radians.")
+parser.add_argument("--enable_openxr_teleop", action="store_true", help="Read Apple Vision Pro/OpenXR hand poses in this Isaac Sim process and drive BRX directly.")
+parser.add_argument("--openxr_scale", type=float, default=1.0, help="OpenXR hand delta to robot EE delta scale.")
+parser.add_argument("--openxr_axis_map", type=str, default="x,y,z", help="Map OpenXR delta axes into robot base axes, e.g. 'z,-x,y'.")
+parser.add_argument("--openxr_rate_hz", type=float, default=30.0, help="Maximum OpenXR teleop command rate.")
+parser.add_argument("--openxr_max_step_m", type=float, default=0.05, help="Maximum EE target movement per OpenXR update.")
+parser.add_argument("--openxr_min_z", type=float, default=0.35)
+parser.add_argument("--openxr_max_z", type=float, default=1.35)
+parser.add_argument("--openxr_pinch_close_m", type=float, default=0.025, help="Thumb-index tip distance treated as closed gripper.")
+parser.add_argument("--openxr_pinch_open_m", type=float, default=0.085, help="Thumb-index tip distance treated as open gripper.")
+parser.add_argument("--openxr_record_path", type=str, default=None, help="Optional ACT-style HDF5 path recorded from OpenXR teleop.")
 parser.add_argument(
     "--camera_pose_mode",
     choices=["link", "lookat"],
@@ -108,6 +120,7 @@ simulation_app = app_launcher.app
 
 import torch
 import torch.nn.functional as F
+import numpy as np
 from PIL import Image
 
 import isaaclab.sim as sim_utils
@@ -121,6 +134,21 @@ from isaaclab.sim import SimulationContext
 from isaaclab.sim.converters import UrdfConverterCfg
 from isaaclab.utils.assets import check_file_path
 from isaaclab.utils.math import matrix_from_quat, quat_from_matrix, subtract_frame_transforms
+
+try:
+    import h5py
+except ImportError:
+    h5py = None
+
+try:
+    from isaaclab.devices import DeviceBase, OpenXRDevice, OpenXRDeviceCfg, RetargeterBase
+    from isaaclab.devices.openxr import XrCfg
+except Exception:
+    DeviceBase = None
+    OpenXRDevice = None
+    OpenXRDeviceCfg = None
+    RetargeterBase = None
+    XrCfg = None
 
 
 EXPECTED_MOVABLE_JOINTS = [
@@ -233,6 +261,147 @@ class CameraBuffer:
 
 COMMAND_BUFFER = CommandBuffer()
 CAMERA_BUFFER = CameraBuffer()
+
+
+class ActHdf5Recorder:
+    """Record the same 3-view ACT layout used by the X-VLA custom handler."""
+
+    def __init__(self, path: str) -> None:
+        if h5py is None:
+            raise RuntimeError("h5py is required for --openxr_record_path")
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.qpos: list[np.ndarray] = []
+        self.action: list[np.ndarray] = []
+        self.images: dict[str, list[np.ndarray]] = {"left_eye": [], "left_wrist": [], "right_wrist": []}
+
+    def append(self, qpos23: list[float]) -> None:
+        qpos = np.asarray(qpos23, dtype=np.float32)
+        self.qpos.append(qpos)
+        # The low-level IK/servo is closed-loop. Record the tracked joint pose as the absolute action target.
+        self.action.append(qpos.copy())
+        for camera_name, dataset_name in (("head", "left_eye"), ("left_wrist", "left_wrist"), ("right_wrist", "right_wrist")):
+            png = CAMERA_BUFFER.get_frame(camera_name)
+            if png is None:
+                frame = np.zeros((args_cli.camera_height, args_cli.camera_width, 3), dtype=np.uint8)
+            else:
+                frame = np.asarray(Image.open(io.BytesIO(png)).convert("RGB"), dtype=np.uint8)
+            self.images[dataset_name].append(frame)
+
+    def save(self) -> None:
+        if not self.qpos:
+            return
+        with h5py.File(self.path, "w") as f:
+            f.create_dataset("action", data=np.stack(self.action, axis=0), dtype="float32")
+            obs = f.create_group("observations")
+            obs.create_dataset("qpos", data=np.stack(self.qpos, axis=0), dtype="float32")
+            image_group = obs.create_group("images")
+            for name, frames in self.images.items():
+                image_group.create_dataset(name, data=np.stack(frames, axis=0), dtype="uint8")
+        print(f"[BRX][OpenXR] saved {len(self.qpos)} frames to {self.path}")
+
+
+def _parse_axis_map(spec: str) -> list[tuple[int, float]]:
+    axes = {"x": 0, "y": 1, "z": 2}
+    mapping: list[tuple[int, float]] = []
+    for raw in spec.split(","):
+        token = raw.strip().lower()
+        sign = -1.0 if token.startswith("-") else 1.0
+        token = token[1:] if token.startswith("-") else token
+        if token not in axes:
+            raise ValueError(f"Bad axis map token: {raw!r}")
+        mapping.append((axes[token], sign))
+    if len(mapping) != 3:
+        raise ValueError("Axis map must contain exactly 3 comma-separated axes")
+    return mapping
+
+
+def _map_axis_delta(delta: np.ndarray, mapping: list[tuple[int, float]]) -> np.ndarray:
+    return np.asarray([sign * delta[idx] for idx, sign in mapping], dtype=np.float32)
+
+
+def _clip_xyz_np(target: np.ndarray, previous: np.ndarray, min_z: float, max_z: float, max_step: float) -> np.ndarray:
+    out = target.astype(np.float32).copy()
+    out[2] = np.clip(out[2], min_z, max_z)
+    delta = out - previous
+    dist = float(np.linalg.norm(delta))
+    if dist > max_step:
+        out = previous + delta / max(dist, 1e-8) * max_step
+    return out
+
+
+@dataclass
+class OpenXRCalibration:
+    left_wrist: np.ndarray
+    right_wrist: np.ndarray
+    left_ee: np.ndarray
+    right_ee: np.ndarray
+
+
+class OpenXRTeleop:
+    """Use Isaac Lab OpenXR hand tracking as BRX ee6d setpoints."""
+
+    def __init__(self) -> None:
+        if OpenXRDevice is None or OpenXRDeviceCfg is None or XrCfg is None or RetargeterBase is None:
+            raise RuntimeError("Isaac Lab OpenXR device is unavailable in this environment")
+        self.device = OpenXRDevice(OpenXRDeviceCfg(xr_cfg=XrCfg()))
+        self.device._required_features = {RetargeterBase.Requirement.HAND_TRACKING, RetargeterBase.Requirement.HEAD_TRACKING}
+        self.axis_map = _parse_axis_map(args_cli.openxr_axis_map)
+        self.calib: OpenXRCalibration | None = None
+        self.last_t = 0.0
+        self.recorder = ActHdf5Recorder(args_cli.openxr_record_path) if args_cli.openxr_record_path else None
+        print("[BRX][OpenXR] enabled. Start Isaac Lab with --xr and connect Apple Vision Pro/CloudXR.")
+        print(f"[BRX][OpenXR] axis_map={args_cli.openxr_axis_map}, scale={args_cli.openxr_scale}")
+
+    def close(self) -> None:
+        if self.recorder is not None:
+            self.recorder.save()
+
+    def _hand(self, data: dict[Any, Any], target: Any) -> dict[str, np.ndarray] | None:
+        if target in data:
+            return data[target]
+        for key, value in data.items():
+            if getattr(key, "name", None) == getattr(target, "name", None):
+                return value
+        return None
+
+    def _grip_from_hand(self, hand: dict[str, np.ndarray]) -> float:
+        thumb = np.asarray(hand.get("thumb_tip", hand["wrist"])[0:3], dtype=np.float32)
+        index = np.asarray(hand.get("index_tip", hand["wrist"])[0:3], dtype=np.float32)
+        dist = float(np.linalg.norm(thumb - index))
+        denom = max(args_cli.openxr_pinch_open_m - args_cli.openxr_pinch_close_m, 1e-6)
+        open_ratio = np.clip((dist - args_cli.openxr_pinch_close_m) / denom, 0.0, 1.0)
+        return float(open_ratio * 0.041)
+
+    def advance(self, state: dict[str, Any]) -> list[float] | None:
+        now = time.monotonic()
+        if now - self.last_t < 1.0 / max(args_cli.openxr_rate_hz, 1e-6):
+            return None
+        data = self.device.advance()
+        if DeviceBase is None:
+            return None
+        left = self._hand(data, DeviceBase.TrackingTarget.HAND_LEFT)
+        right = self._hand(data, DeviceBase.TrackingTarget.HAND_RIGHT)
+        if not left or not right or "wrist" not in left or "wrist" not in right:
+            return None
+
+        ee6d = np.asarray(state["ee6d_base"], dtype=np.float32)
+        left_wrist = np.asarray(left["wrist"][0:3], dtype=np.float32)
+        right_wrist = np.asarray(right["wrist"][0:3], dtype=np.float32)
+        if self.calib is None:
+            self.calib = OpenXRCalibration(left_wrist=left_wrist.copy(), right_wrist=right_wrist.copy(), left_ee=ee6d[0:3].copy(), right_ee=ee6d[10:13].copy())
+            print("[BRX][OpenXR] calibrated from current wrist and BRX EE poses")
+
+        assert self.calib is not None
+        row = ee6d.copy()
+        left_target = self.calib.left_ee + args_cli.openxr_scale * _map_axis_delta(left_wrist - self.calib.left_wrist, self.axis_map)
+        right_target = self.calib.right_ee + args_cli.openxr_scale * _map_axis_delta(right_wrist - self.calib.right_wrist, self.axis_map)
+        row[0:3] = _clip_xyz_np(left_target, ee6d[0:3], args_cli.openxr_min_z, args_cli.openxr_max_z, args_cli.openxr_max_step_m)
+        row[10:13] = _clip_xyz_np(right_target, ee6d[10:13], args_cli.openxr_min_z, args_cli.openxr_max_z, args_cli.openxr_max_step_m)
+        row[9] = self._grip_from_hand(left)
+        row[19] = self._grip_from_hand(right)
+        self.last_t = now
+        return row.astype(float).tolist()
 
 
 def _abs_path(path: str) -> str:
@@ -791,36 +960,50 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
     print("[BRX] gripper scalar is interpreted as jaw meters and clamped to [0, 0.041]")
     print(f"[BRX] default head joints: Head02={args_cli.default_head02:.5f}, Head03={args_cli.default_head03:.5f}")
     COMMAND_BUFFER.set_state(_state_snapshot(robot, left_ctx, right_ctx))
+    openxr_teleop = OpenXRTeleop() if args_cli.enable_openxr_teleop else None
 
     hold_count = 0
     step_count = 0
     current_mode: str | None = None
     current_row: list[float] | None = None
-    while simulation_app.is_running():
-        if hold_count <= 0:
-            current_mode, current_row, _ = COMMAND_BUFFER.next_row()
-            hold_count = max(1, args_cli.command_hold_steps)
-        hold_count -= 1
+    try:
+        while simulation_app.is_running():
+            state_before = COMMAND_BUFFER.get_state()
+            openxr_row = openxr_teleop.advance(state_before) if openxr_teleop is not None and state_before.get("ready") else None
+            if openxr_row is not None:
+                current_mode = "ee6d"
+                current_row = openxr_row
+                hold_count = max(1, args_cli.command_hold_steps)
+            elif hold_count <= 0:
+                current_mode, current_row, _ = COMMAND_BUFFER.next_row()
+                hold_count = max(1, args_cli.command_hold_steps)
+            hold_count -= 1
 
-        if current_mode == "joint23" and current_row is not None:
-            _apply_joint23(robot, current_row)
-        elif current_mode == "reset_joint23" and current_row is not None:
-            _reset_joint23(robot, current_row)
-            COMMAND_BUFFER.set_command("stop", [])
-        elif current_mode == "ee6d" and current_row is not None:
-            _apply_ee6d(sim, robot, left_ctx, right_ctx, current_row)
-        elif current_mode == "stop":
-            robot.set_joint_position_target(robot.data.joint_pos)
+            if current_mode == "joint23" and current_row is not None:
+                _apply_joint23(robot, current_row)
+            elif current_mode == "reset_joint23" and current_row is not None:
+                _reset_joint23(robot, current_row)
+                COMMAND_BUFFER.set_command("stop", [])
+            elif current_mode == "ee6d" and current_row is not None:
+                _apply_ee6d(sim, robot, left_ctx, right_ctx, current_row)
+            elif current_mode == "stop":
+                robot.set_joint_position_target(robot.data.joint_pos)
 
-        robot.write_data_to_sim()
-        sim.step()
-        robot.update(sim_dt)
-        step_count += 1
-        if step_count % camera_update_every == 0:
-            _update_camera_poses(camera, robot, head_body_id, left_wrist_camera_body_id, right_wrist_camera_body_id, sim.device)
-            camera.update(sim_dt * camera_update_every)
-            _update_camera_cache(camera)
-        COMMAND_BUFFER.set_state(_state_snapshot(robot, left_ctx, right_ctx))
+            robot.write_data_to_sim()
+            sim.step()
+            robot.update(sim_dt)
+            step_count += 1
+            if step_count % camera_update_every == 0:
+                _update_camera_poses(camera, robot, head_body_id, left_wrist_camera_body_id, right_wrist_camera_body_id, sim.device)
+                camera.update(sim_dt * camera_update_every)
+                _update_camera_cache(camera)
+            state_after = _state_snapshot(robot, left_ctx, right_ctx)
+            COMMAND_BUFFER.set_state(state_after)
+            if openxr_row is not None and openxr_teleop is not None and openxr_teleop.recorder is not None:
+                openxr_teleop.recorder.append(state_after["qpos23"])
+    finally:
+        if openxr_teleop is not None:
+            openxr_teleop.close()
 
 
 def main() -> None:
