@@ -324,8 +324,15 @@ def _load_policy():
     if not args_cli.checkpoint_dir:
         raise ValueError("--checkpoint_dir is required in policy mode")
     openpi_root = _abs_path(args_cli.openpi_root)
-    if openpi_root not in sys.path:
-        sys.path.insert(0, openpi_root)
+    openpi_src = str(Path(openpi_root) / "src")
+    for path in [openpi_src, openpi_root]:
+        if path not in sys.path:
+            sys.path.insert(0, path)
+    if not (Path(openpi_src) / "openpi").exists() and not (Path(openpi_root) / "openpi").exists():
+        raise ModuleNotFoundError(
+            f"Cannot find openpi package under --openpi_root={openpi_root}. "
+            f"Expected either {openpi_src}/openpi or {openpi_root}/openpi."
+        )
     from openpi.policies import policy_config
     from openpi.training import config as _config
 
