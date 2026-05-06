@@ -163,6 +163,19 @@ def _spawn_rigid_cube(path: str, size: float, pos: tuple[float, float, float], c
     cfg.func(path, cfg, translation=pos)
 
 
+def _spawn_bucket(prefix: str, center: tuple[float, float, float]) -> None:
+    x, y, table_z = center
+    wall_t, outer, height, bottom_t = 0.018, 0.20, 0.16, 0.018
+    base_z = table_z + bottom_t * 0.5
+    wall_z = table_z + bottom_t + height * 0.5
+    color = (0.95, 0.72, 0.18)
+    _spawn_static_cuboid(f"{prefix}/Bottom", (outer, outer, bottom_t), (x, y, base_z), color)
+    _spawn_static_cuboid(f"{prefix}/WallPosX", (wall_t, outer, height), (x + outer * 0.5, y, wall_z), color)
+    _spawn_static_cuboid(f"{prefix}/WallNegX", (wall_t, outer, height), (x - outer * 0.5, y, wall_z), color)
+    _spawn_static_cuboid(f"{prefix}/WallPosY", (outer, wall_t, height), (x, y + outer * 0.5, wall_z), color)
+    _spawn_static_cuboid(f"{prefix}/WallNegY", (outer, wall_t, height), (x, y - outer * 0.5, wall_z), color)
+
+
 def _spawn_scene() -> None:
     ground = sim_utils.GroundPlaneCfg(
         color=(0.5, 0.5, 0.5),
@@ -176,6 +189,7 @@ def _spawn_scene() -> None:
         return
     sim_utils.create_prim("/World/TaskScene", "Xform")
     _spawn_static_cuboid("/World/TaskScene/TableTop", (0.8, 0.8, 0.1), (-0.30, 0.0, 2.15), (0.5, 0.5, 0.5))
+    _spawn_bucket("/World/TaskScene/Bucket", (-0.30, 0.0, 2.20))
     _spawn_rigid_cube("/World/TaskScene/BlockA", 0.05, (-0.55, 0.0, 2.30), (1.0, 0.5, 0.5))
     _spawn_rigid_cube("/World/TaskScene/BlockB", 0.05, (-0.55, 0.20, 2.30), (0.5, 0.8, 1.0))
 
