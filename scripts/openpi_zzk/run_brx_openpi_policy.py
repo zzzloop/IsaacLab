@@ -4,9 +4,13 @@ The script is self-contained and does not import or modify scripts/custom.
 """
 
 import argparse
+import base64
+import io
+import json
 import os
 from pathlib import Path
 import sys
+import urllib.request
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
@@ -14,10 +18,11 @@ from isaaclab.app import AppLauncher
 
 
 parser = argparse.ArgumentParser(description="BRX042501 openpi policy runner for Isaac Lab.")
-parser.add_argument("--mode", choices=["policy", "replay_hdf5"], default="policy")
+parser.add_argument("--mode", choices=["remote_policy", "policy", "replay_hdf5"], default="remote_policy")
 parser.add_argument("--openpi_root", type=str, default="/home/kemove/openpi_zzk")
 parser.add_argument("--config_name", type=str, default="pi05_brx_finetune")
 parser.add_argument("--checkpoint_dir", type=str, default="")
+parser.add_argument("--policy_server_url", type=str, default="http://127.0.0.1:8777/infer")
 parser.add_argument("--prompt", type=str, default="move the object smoothly")
 parser.add_argument("--action_hdf5", type=str, default="")
 parser.add_argument("--urdf_path", type=str, default="/home/kemove/zzk_data/IsaacLab/BRX042501/BRX042501_wheel.urdf")
@@ -284,6 +289,14 @@ def _rgb_to_numpy(rgb: torch.Tensor) -> np.ndarray:
     return array
 
 
+def _png_b64(array: np.ndarray) -> str:
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.fromarray(array).save(buffer, format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
 def _qpos23(robot: Articulation) -> np.ndarray:
     joint_pos = robot.data.joint_pos[0]
     return np.asarray(
@@ -352,6 +365,30 @@ def _load_replay_actions() -> np.ndarray:
     return actions
 
 
+def _infer_remote_policy(observation: dict) -> list[np.ndarray]:
+    images = observation["images"]
+    payload = {
+        "state": np.asarray(observation["state"], dtype=np.float32).tolist(),
+        "images": {
+            "left_eye": _png_b64(images["left_eye"]),
+            "left_wrist": _png_b64(images["left_wrist"]),
+            "right_wrist": _png_b64(images["right_wrist"]),
+        },
+        "prompt": observation.get("prompt") or args_cli.prompt,
+    }
+    request = urllib.request.Request(
+        args_cli.policy_server_url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=120.0) as response:
+        result = json.loads(response.read().decode("utf-8"))
+    if not result.get("ok", False):
+        raise RuntimeError(f"Remote policy error: {result}")
+    return [np.asarray(row, dtype=np.float32) for row in result["actions"]]
+
+
 def _validate_robot(robot: Articulation) -> None:
     missing = [name for name in BRX_JOINT_NAMES if name not in robot.joint_names]
     if missing:
@@ -389,13 +426,20 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
                     replay_idx += 1
                 else:
                     current_action = _qpos23(robot)
-            else:
+            elif args_cli.mode == "policy":
                 if not action_queue:
                     _update_camera_poses(camera, robot, sim.device)
                     camera.update(sim_dt)
                     result = policy.infer(_make_observation(robot, camera))
                     action_queue = [np.asarray(row, dtype=np.float32) for row in result["actions"]]
                     print(f"[BRX openpi] inferred action chunk: {len(action_queue)} x {action_queue[0].shape[0]}")
+                current_action = action_queue.pop(0)
+            else:
+                if not action_queue:
+                    _update_camera_poses(camera, robot, sim.device)
+                    camera.update(sim_dt)
+                    action_queue = _infer_remote_policy(_make_observation(robot, camera))
+                    print(f"[BRX openpi] remote action chunk: {len(action_queue)} x {action_queue[0].shape[0]}")
                 current_action = action_queue.pop(0)
             hold_count = max(1, args_cli.command_hold_steps)
 
