@@ -113,28 +113,29 @@ CAMERA_NAMES = ["left_eye", "left_wrist", "right_wrist"]
 
 # Built-in BRX startup pose. This is used unless explicitly overridden by
 # --initial_qpos23, --initial_qpos_hdf5, or --no_initial_qpos_reset.
-# Order is BRX_JOINT_NAMES: upright folded mast, arms slightly raised/forward,
-# grippers open, head pitched down toward the table.
+# Order is BRX_JOINT_NAMES. URDF FK puts this zero upper-body pose upright with
+# both grippers above the tabletop near the block area; only grippers and head
+# are non-zero.
 DEFAULT_INITIAL_QPOS23 = np.asarray(
     [
-        -1.05,  # FoldingModularJoint02_Joint
-        1.35,  # FoldingModularJoint03_Joint
+        0.0,  # FoldingModularJoint02_Joint
+        0.0,  # FoldingModularJoint03_Joint
         0.0,  # Trunk_Joint
-        0.35,  # ArmL02_Joint
-        -0.35,  # ArmL03_Joint
+        0.0,  # ArmL02_Joint
+        0.0,  # ArmL03_Joint
         0.0,  # ArmL04_Joint
-        0.75,  # ArmL05_Joint
+        0.0,  # ArmL05_Joint
         0.0,  # ArmL06_Joint
-        0.15,  # ArmL07_Joint
+        0.0,  # ArmL07_Joint
         0.0,  # ArmL08_Joint
         0.035,  # JawBlock01_Joint
         0.035,  # JawBlock02_Joint
-        0.35,  # ArmR02_Joint
-        0.35,  # ArmR03_Joint
+        0.0,  # ArmR02_Joint
+        0.0,  # ArmR03_Joint
         0.0,  # ArmR04_Joint
-        -0.75,  # ArmR05_Joint
+        0.0,  # ArmR05_Joint
         0.0,  # ArmR06_Joint
-        -0.15,  # ArmR07_Joint
+        0.0,  # ArmR07_Joint
         0.0,  # ArmR08_Joint
         0.035,  # JawBlock03_Joint
         0.035,  # JawBlock04_Joint
