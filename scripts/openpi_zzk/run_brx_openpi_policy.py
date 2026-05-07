@@ -60,6 +60,7 @@ parser.add_argument("--head_camera_forward", type=float, nargs=3, default=(0.25,
 parser.add_argument("--wrist_camera_forward", type=float, nargs=3, default=(0.20, 0.0, -0.12))
 parser.add_argument("--no_task_scene", action="store_true")
 parser.add_argument("--policy_start_delay_s", type=float, default=0.0, help="Optional delay before policy/replay starts.")
+parser.add_argument("--debug_pose_print_s", type=float, default=1.0, help="Print BRX torso/head/root pose every N seconds. Use 0 to disable.")
 parser.add_argument("--unlock_torso", action="store_true", help="Allow policy/replay to command Folding02/Folding03/Trunk. Default locks them upright.")
 parser.add_argument("--unlock_head", action="store_true", help="Allow policy/replay to command Head02/Head03. Default locks head to startup pose.")
 AppLauncher.add_app_launcher_args(parser)
@@ -447,6 +448,46 @@ def _print_action_summary(source: str, rows: list[np.ndarray]) -> None:
     )
 
 
+def _debug_pose_snapshot(robot: Articulation, label: str) -> None:
+    if args_cli.debug_pose_print_s <= 0.0:
+        return
+    joint_pos = robot.data.joint_pos[0]
+    values = {}
+    for name in [
+        "FoldingModularJoint02_Joint",
+        "FoldingModularJoint03_Joint",
+        "Trunk_Joint",
+        "Head02_Joint",
+        "Head03_Joint",
+    ]:
+        if name in robot.joint_names:
+            values[name] = round(float(joint_pos[robot.joint_names.index(name)].detach().cpu()), 5)
+        else:
+            values[name] = None
+
+    root = robot.data.root_pose_w[0].detach().cpu().numpy()
+    body_heights = {}
+    for name in [
+        "Base_Link",
+        "FoldingModule02_Link",
+        "FoldingModule03_Link",
+        "Trunk_Link",
+        "Head02_Link",
+        "Head03_Link",
+        args_cli.head_camera_body,
+    ]:
+        if name in robot.body_names:
+            body_heights[name] = round(float(robot.data.body_state_w[0, robot.body_names.index(name), 2].detach().cpu()), 4)
+
+    print(
+        f"[BRX pose] {label} "
+        f"joints={values} "
+        f"root_xyz={np.round(root[0:3], 4).tolist()} "
+        f"root_quat_wxyz={np.round(root[3:7], 4).tolist()} "
+        f"body_z={body_heights}"
+    )
+
+
 def _lock_non_arm_joints(row: np.ndarray, locked_qpos: np.ndarray) -> np.ndarray:
     """Keep the robot upright by default.
 
@@ -585,6 +626,7 @@ def _hold_until_policy_start(
     start_time = time.monotonic()
     last_wait_print = 0.0
     last_policy_poll = 0.0
+    last_pose_print = time.monotonic()
     policy_ready = False
     if args_cli.mode == "remote_policy":
         print(f"[BRX openpi] waiting for policy server health: {_policy_health_url()}")
@@ -606,6 +648,9 @@ def _hold_until_policy_start(
         if args_cli.mode == "remote_policy" and now - last_wait_print >= 2.0:
             print("[BRX openpi] sim is rendering; policy server not ready yet")
             last_wait_print = now
+        if args_cli.debug_pose_print_s > 0.0 and now - last_pose_print >= args_cli.debug_pose_print_s:
+            _debug_pose_snapshot(robot, "waiting_for_policy")
+            last_pose_print = now
 
         robot.set_joint_position_target(robot.data.joint_pos)
         _update_camera_poses(camera, robot, head_body_id, left_wrist_camera_body_id, right_wrist_camera_body_id, sim.device)
@@ -624,12 +669,14 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
         _reset_joint23(robot, initial_qpos)
     else:
         _apply_default_startup_pose(robot)
+    _debug_pose_snapshot(robot, "after_startup_pose_write")
     _configure_camera_poses(camera, sim.device)
     robot.write_data_to_sim()
     sim.step()
     robot.update(sim_dt)
     camera.update(sim_dt)
     _render_viewport(sim)
+    _debug_pose_snapshot(robot, "after_first_step")
 
     if args_cli.head_camera_body not in robot.body_names:
         raise RuntimeError(f"Missing head camera body: {args_cli.head_camera_body}")
@@ -654,6 +701,7 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
         robot.update(sim_dt)
         camera.update(sim_dt)
         _render_viewport(sim)
+    _debug_pose_snapshot(robot, "after_warmup")
 
     replay_actions = _load_replay_actions() if args_cli.mode == "replay_hdf5" else None
     action_queue: list[np.ndarray] = []
@@ -669,6 +717,7 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
     )
 
     print(f"[BRX openpi] mode={args_cli.mode}, hold_steps={args_cli.command_hold_steps}")
+    last_pose_print = time.monotonic()
     _hold_until_policy_start(
         sim,
         robot,
@@ -679,6 +728,10 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
         sim_dt,
     )
     while simulation_app.is_running():
+        now = time.monotonic()
+        if args_cli.debug_pose_print_s > 0.0 and now - last_pose_print >= args_cli.debug_pose_print_s:
+            _debug_pose_snapshot(robot, "run_loop")
+            last_pose_print = now
         if hold_count <= 0:
             if args_cli.mode == "replay_hdf5":
                 if replay_idx < len(replay_actions):
