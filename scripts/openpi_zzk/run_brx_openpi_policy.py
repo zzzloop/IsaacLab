@@ -67,7 +67,8 @@ parser.add_argument("--default_head03", type=float, default=-0.81304)
 parser.add_argument("--startup_gripper_open_m", type=float, default=0.041, help="Startup jaw opening target in meters.")
 parser.add_argument("--gripper_max_m", type=float, default=0.041, help="Clamp BRX JawBlock policy targets to [0, gripper_max_m].")
 parser.add_argument("--no_gripper_clamp", action="store_true", help="Send raw policy gripper values without clamping.")
-parser.add_argument("--swap_left_right_gripper", action="store_true", help="Swap JawBlock01/02 with JawBlock03/04 for replay/policy debugging.")
+parser.add_argument("--swap_left_right_gripper", action="store_true", help="Deprecated compatibility flag. Grippers are swapped by default to match ACT data order.")
+parser.add_argument("--no_swap_left_right_gripper", action="store_true", help="Disable default ACT-data gripper remap for debugging raw URDF JawBlock order.")
 parser.add_argument("--head_camera_body", type=str, default="EyeL_Link")
 parser.add_argument("--left_wrist_camera_body", type=str, default="HandCam02_Link")
 parser.add_argument("--right_wrist_camera_body", type=str, default="HandCam01_Link")
@@ -136,6 +137,10 @@ RIGHT_GRIPPER_JOINTS = ["JawBlock01_Joint", "JawBlock02_Joint"]
 LEFT_GRIPPER_JOINTS = ["JawBlock03_Joint", "JawBlock04_Joint"]
 GRIPPER_JOINT_NAMES = RIGHT_GRIPPER_JOINTS + LEFT_GRIPPER_JOINTS
 GRIPPER_QPOS23_INDICES = [BRX_JOINT_NAMES.index(name) for name in GRIPPER_JOINT_NAMES]
+# ACT HDF5 rows store gripper values by arm side: indices 10/11 follow ArmL,
+# indices 19/20 follow ArmR. The BRX URDF names are opposite by JawBlock id
+# (JawBlock03/04 are the left gripper, JawBlock01/02 are the right gripper), so
+# simulation commands remap those two pairs by default.
 
 
 def _abs_path(path: str) -> str:
@@ -472,7 +477,7 @@ def _print_action_summary(source: str, rows: list[np.ndarray]) -> None:
 
 def _sanitize_qpos23(row: np.ndarray, clamp_gripper: bool | None = None) -> np.ndarray:
     safe = np.asarray(row, dtype=np.float32).copy()
-    if args_cli.swap_left_right_gripper:
+    if _use_act_gripper_remap():
         right = safe[[10, 11]].copy()
         left = safe[[19, 20]].copy()
         safe[[10, 11]] = left
@@ -482,6 +487,10 @@ def _sanitize_qpos23(row: np.ndarray, clamp_gripper: bool | None = None) -> np.n
     if clamp_gripper:
         safe[GRIPPER_QPOS23_INDICES] = np.clip(safe[GRIPPER_QPOS23_INDICES], 0.0, args_cli.gripper_max_m)
     return safe
+
+
+def _use_act_gripper_remap() -> bool:
+    return args_cli.swap_left_right_gripper or not args_cli.no_swap_left_right_gripper
 
 
 def _print_action_table(source: str, current_qpos: np.ndarray, rows: list[np.ndarray]) -> None:
@@ -500,10 +509,10 @@ def _print_action_table(source: str, current_qpos: np.ndarray, rows: list[np.nda
         "[BRX action table] first chunk range: "
         f"raw_min={float(np.min(raw_first)):.5f} raw_max={float(np.max(raw_first)):.5f} "
         f"applied_min={float(np.min(first)):.5f} applied_max={float(np.max(first)):.5f} "
-        f"right_grip_raw={np.round(raw_first[10:12], 5).tolist()} "
-        f"left_grip_raw={np.round(raw_first[19:21], 5).tolist()} "
-        f"right_grip_applied={np.round(first[10:12], 5).tolist()} "
-        f"left_grip_applied={np.round(first[19:21], 5).tolist()}"
+        f"dataset_left_grip_raw_idx10_11={np.round(raw_first[10:12], 5).tolist()} "
+        f"dataset_right_grip_raw_idx19_20={np.round(raw_first[19:21], 5).tolist()} "
+        f"urdf_right_grip_applied_idx10_11={np.round(first[10:12], 5).tolist()} "
+        f"urdf_left_grip_applied_idx19_20={np.round(first[19:21], 5).tolist()}"
     )
 
 
@@ -685,9 +694,9 @@ def _load_replay_rows() -> np.ndarray:
     )
     print(
         "[BRX replay] gripper raw range "
-        f"JawBlock01/02={np.round([np.min(rows[:, 10:12]), np.max(rows[:, 10:12])], 5).tolist()} "
-        f"JawBlock03/04={np.round([np.min(rows[:, 19:21]), np.max(rows[:, 19:21])], 5).tolist()} "
-        f"swap_left_right_gripper={args_cli.swap_left_right_gripper}"
+        f"dataset_left_idx10_11={np.round([np.min(rows[:, 10:12]), np.max(rows[:, 10:12])], 5).tolist()} "
+        f"dataset_right_idx19_20={np.round([np.min(rows[:, 19:21]), np.max(rows[:, 19:21])], 5).tolist()} "
+        f"act_gripper_remap={_use_act_gripper_remap()}"
     )
     return rows
 
