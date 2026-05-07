@@ -29,7 +29,7 @@ parser.add_argument("--action_hdf5", type=str, default="")
 parser.add_argument("--initial_qpos23", type=float, nargs=23, default=None, help="Explicit 23D startup qpos in BRX order.")
 parser.add_argument("--initial_qpos_hdf5", type=str, default="", help="Optional ACT HDF5 used only when --initial_qpos23 is not provided.")
 parser.add_argument("--initial_qpos_frame", type=int, default=0)
-parser.add_argument("--no_initial_qpos_reset", action="store_true")
+parser.add_argument("--no_initial_qpos_reset", action="store_true", help="Disable explicit --initial_qpos23/--initial_qpos_hdf5 reset.")
 parser.add_argument("--print_action_summary", action="store_true", help="Print fold/trunk/head values for each new action chunk.")
 parser.add_argument("--urdf_path", type=str, default="/home/kemove/zzk_data/IsaacLab/BRX042501/BRX042501_wheel.urdf")
 parser.add_argument("--usd_dir", type=str, default=None)
@@ -110,39 +110,11 @@ BRX_JOINT_NAMES = [
 
 CAMERA_NAMES = ["left_eye", "left_wrist", "right_wrist"]
 
-# Built-in BRX startup pose. This is used unless explicitly overridden by
-# --initial_qpos23, --initial_qpos_hdf5, or --no_initial_qpos_reset.
-# Order is BRX_JOINT_NAMES. URDF FK puts this zero upper-body pose upright with
-# both grippers above the tabletop near the block area; only grippers and head
-# are non-zero.
-DEFAULT_INITIAL_QPOS23 = np.asarray(
-    [
-        0.0,  # FoldingModularJoint02_Joint
-        0.0,  # FoldingModularJoint03_Joint
-        0.0,  # Trunk_Joint
-        0.0,  # ArmL02_Joint
-        0.0,  # ArmL03_Joint
-        0.0,  # ArmL04_Joint
-        0.0,  # ArmL05_Joint
-        0.0,  # ArmL06_Joint
-        0.0,  # ArmL07_Joint
-        0.0,  # ArmL08_Joint
-        0.035,  # JawBlock01_Joint
-        0.035,  # JawBlock02_Joint
-        0.0,  # ArmR02_Joint
-        0.0,  # ArmR03_Joint
-        0.0,  # ArmR04_Joint
-        0.0,  # ArmR05_Joint
-        0.0,  # ArmR06_Joint
-        0.0,  # ArmR07_Joint
-        0.0,  # ArmR08_Joint
-        0.035,  # JawBlock03_Joint
-        0.035,  # JawBlock04_Joint
-        -0.17918,  # Head02_Joint
-        -0.81304,  # Head03_Joint
-    ],
-    dtype=np.float32,
-)
+DEFAULT_TORSO_QPOS = {
+    "FoldingModularJoint02_Joint": 0.0,
+    "FoldingModularJoint03_Joint": 0.0,
+    "Trunk_Joint": 0.0,
+}
 
 
 def _abs_path(path: str) -> str:
@@ -442,11 +414,7 @@ def _load_initial_qpos23() -> np.ndarray | None:
         print(f"[BRX openpi] initial qpos reset from --initial_qpos23: fold/trunk/head={np.round(qpos[[0, 1, 2, 21, 22]], 4).tolist()}")
         return qpos
     if not args_cli.initial_qpos_hdf5:
-        qpos = DEFAULT_INITIAL_QPOS23.copy()
-        qpos[21] = args_cli.default_head02
-        qpos[22] = args_cli.default_head03
-        print(f"[BRX openpi] initial qpos reset from built-in upright preset: fold/trunk/head={np.round(qpos[[0, 1, 2, 21, 22]], 4).tolist()}")
-        return qpos
+        return None
     path = _abs_path(args_cli.initial_qpos_hdf5)
     if not os.path.exists(path):
         raise FileNotFoundError(
@@ -494,13 +462,17 @@ def _lock_non_arm_joints(row: np.ndarray, locked_qpos: np.ndarray) -> np.ndarray
     return safe
 
 
-def _apply_default_head_pose(robot: Articulation) -> None:
-    names = ["Head02_Joint", "Head03_Joint"]
+def _apply_default_startup_pose(robot: Articulation) -> None:
+    names = list(DEFAULT_TORSO_QPOS.keys()) + ["Head02_Joint", "Head03_Joint"]
     if not all(name in robot.joint_names for name in names):
         missing = [name for name in names if name not in robot.joint_names]
-        raise RuntimeError(f"Missing head joint(s): {missing}")
+        raise RuntimeError(f"Missing startup joint(s): {missing}")
     joint_ids = [robot.joint_names.index(name) for name in names]
-    values = torch.tensor([[args_cli.default_head02, args_cli.default_head03]], dtype=torch.float32, device=robot.device)
+    values = torch.tensor(
+        [[0.0, 0.0, 0.0, args_cli.default_head02, args_cli.default_head03]],
+        dtype=torch.float32,
+        device=robot.device,
+    )
 
     joint_pos = robot.data.joint_pos.clone()
     joint_vel = robot.data.joint_vel.clone()
@@ -508,6 +480,10 @@ def _apply_default_head_pose(robot: Articulation) -> None:
     joint_vel[:, joint_ids] = 0.0
     robot.write_joint_state_to_sim(joint_pos, joint_vel)
     robot.set_joint_position_target(values, joint_ids=joint_ids)
+    print(
+        "[BRX openpi] startup torso/head set only: "
+        f"fold/trunk/head={np.round(values[0].detach().cpu().numpy(), 4).tolist()}"
+    )
 
 
 def _make_observation(robot: Articulation, camera: Camera) -> dict:
@@ -647,7 +623,7 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
     if initial_qpos is not None:
         _reset_joint23(robot, initial_qpos)
     else:
-        _apply_default_head_pose(robot)
+        _apply_default_startup_pose(robot)
     _configure_camera_poses(camera, sim.device)
     robot.write_data_to_sim()
     sim.step()
