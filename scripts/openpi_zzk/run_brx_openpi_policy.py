@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import random
 import sys
+import time
 import urllib.request
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
@@ -54,6 +55,9 @@ parser.add_argument("--head_camera_offset", type=float, nargs=3, default=(0.0, 0
 parser.add_argument("--head_camera_forward", type=float, nargs=3, default=(0.25, 0.0, 0.0))
 parser.add_argument("--wrist_camera_forward", type=float, nargs=3, default=(0.20, 0.0, -0.12))
 parser.add_argument("--no_task_scene", action="store_true")
+parser.add_argument("--wait_for_start_signal", action="store_true", help="Hold the robot and render until start_signal_file exists.")
+parser.add_argument("--start_signal_file", type=str, default="/tmp/brx_openpi_start")
+parser.add_argument("--policy_start_delay_s", type=float, default=0.0, help="Optional delay before policy/replay starts.")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -467,6 +471,51 @@ def _validate_robot(robot: Articulation) -> None:
         print(f"  {idx:02d}: {name}")
 
 
+def _render_viewport(sim: SimulationContext) -> None:
+    """Force a viewport render for livestream/WebRTC in headless runs."""
+    try:
+        sim.render()
+    except Exception:
+        # Older Isaac Lab builds may render implicitly during sim.step().
+        pass
+
+
+def _hold_until_policy_start(
+    sim: SimulationContext,
+    robot: Articulation,
+    camera: Camera,
+    head_body_id: int,
+    left_wrist_camera_body_id: int,
+    right_wrist_camera_body_id: int,
+    sim_dt: float,
+) -> None:
+    if args_cli.policy_start_delay_s <= 0.0 and not args_cli.wait_for_start_signal:
+        return
+
+    start_time = time.monotonic()
+    signal_file = _abs_path(args_cli.start_signal_file)
+    if args_cli.wait_for_start_signal:
+        print(f"[BRX openpi] waiting for start signal file: {signal_file}")
+        print(f"[BRX openpi] after WebRTC connects, run: touch {signal_file}")
+    if args_cli.policy_start_delay_s > 0.0:
+        print(f"[BRX openpi] delaying policy start for {args_cli.policy_start_delay_s:.1f}s")
+
+    while simulation_app.is_running():
+        delay_done = time.monotonic() - start_time >= args_cli.policy_start_delay_s
+        signal_done = (not args_cli.wait_for_start_signal) or os.path.exists(signal_file)
+        if delay_done and signal_done:
+            print("[BRX openpi] policy/replay start released")
+            return
+
+        robot.set_joint_position_target(robot.data.joint_pos)
+        _update_camera_poses(camera, robot, head_body_id, left_wrist_camera_body_id, right_wrist_camera_body_id, sim.device)
+        robot.write_data_to_sim()
+        sim.step()
+        robot.update(sim_dt)
+        camera.update(sim_dt)
+        _render_viewport(sim)
+
+
 def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -> None:
     sim_dt = sim.get_physics_dt()
     _validate_robot(robot)
@@ -476,6 +525,7 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
     sim.step()
     robot.update(sim_dt)
     camera.update(sim_dt)
+    _render_viewport(sim)
 
     if args_cli.head_camera_body not in robot.body_names:
         raise RuntimeError(f"Missing head camera body: {args_cli.head_camera_body}")
@@ -492,6 +542,14 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
     _update_camera_poses(camera, robot, head_body_id, left_wrist_camera_body_id, right_wrist_camera_body_id, sim.device)
     camera_update_every = max(1, args_cli.camera_update_every)
     camera.update(sim_dt * camera_update_every)
+    for _ in range(max(1, args_cli.warmup_steps)):
+        robot.set_joint_position_target(robot.data.joint_pos)
+        _update_camera_poses(camera, robot, head_body_id, left_wrist_camera_body_id, right_wrist_camera_body_id, sim.device)
+        robot.write_data_to_sim()
+        sim.step()
+        robot.update(sim_dt)
+        camera.update(sim_dt)
+        _render_viewport(sim)
 
     policy = _load_policy() if args_cli.mode == "policy" else None
     replay_actions = _load_replay_actions() if args_cli.mode == "replay_hdf5" else None
@@ -502,6 +560,15 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
     current_action = _qpos23(robot)
 
     print(f"[BRX openpi] mode={args_cli.mode}, hold_steps={args_cli.command_hold_steps}")
+    _hold_until_policy_start(
+        sim,
+        robot,
+        camera,
+        head_body_id,
+        left_wrist_camera_body_id,
+        right_wrist_camera_body_id,
+        sim_dt,
+    )
     while simulation_app.is_running():
         if hold_count <= 0:
             if args_cli.mode == "replay_hdf5":
@@ -532,6 +599,7 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
         robot.write_data_to_sim()
         sim.step()
         robot.update(sim_dt)
+        _render_viewport(sim)
         step_count += 1
         if step_count % camera_update_every == 0:
             _update_camera_poses(camera, robot, head_body_id, left_wrist_camera_body_id, right_wrist_camera_body_id, sim.device)
