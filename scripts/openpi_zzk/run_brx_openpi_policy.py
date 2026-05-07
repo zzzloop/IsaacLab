@@ -9,6 +9,7 @@ import io
 import json
 import os
 from pathlib import Path
+import random
 import sys
 import urllib.request
 
@@ -37,9 +38,13 @@ parser.add_argument("--joint_stiffness", type=float, default=2500.0)
 parser.add_argument("--joint_damping", type=float, default=120.0)
 parser.add_argument("--effort_limit", type=float, default=800.0)
 parser.add_argument("--velocity_limit", type=float, default=60.0)
+parser.add_argument("--teleop_assets_root", type=str, default="teleop/assets")
+parser.add_argument("--fixed_blocks", dest="randomize_blocks", action="store_false")
+parser.add_argument("--block_seed", type=int, default=None)
 parser.add_argument("--camera_width", type=int, default=640)
 parser.add_argument("--camera_height", type=int, default=360)
-parser.add_argument("--camera_pose_mode", choices=["link", "lookat", "fixed"], default="link")
+parser.add_argument("--camera_update_every", type=int, default=1)
+parser.add_argument("--camera_pose_mode", choices=["link", "lookat"], default="link")
 parser.add_argument("--default_head02", type=float, default=-0.17918)
 parser.add_argument("--default_head03", type=float, default=-0.81304)
 parser.add_argument("--head_camera_body", type=str, default="EyeL_Link")
@@ -47,7 +52,7 @@ parser.add_argument("--left_wrist_camera_body", type=str, default="HandCam02_Lin
 parser.add_argument("--right_wrist_camera_body", type=str, default="HandCam01_Link")
 parser.add_argument("--head_camera_offset", type=float, nargs=3, default=(0.0, 0.0, 0.0))
 parser.add_argument("--head_camera_forward", type=float, nargs=3, default=(0.25, 0.0, 0.0))
-parser.add_argument("--wrist_camera_forward", type=float, nargs=3, default=(0.20, 0.0, -0.05))
+parser.add_argument("--wrist_camera_forward", type=float, nargs=3, default=(0.20, 0.0, -0.12))
 parser.add_argument("--no_task_scene", action="store_true")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
@@ -99,7 +104,14 @@ CAMERA_NAMES = ["left_eye", "left_wrist", "right_wrist"]
 
 
 def _abs_path(path: str) -> str:
-    return str(Path(path).expanduser().resolve())
+    return os.path.abspath(os.path.expanduser(path))
+
+
+def _asset_path(*parts: str) -> str:
+    root = args_cli.teleop_assets_root
+    if not os.path.isabs(root):
+        root = os.path.join(os.getcwd(), root)
+    return _abs_path(os.path.join(root, *parts))
 
 
 def _make_robot_cfg() -> ArticulationCfg:
@@ -112,7 +124,7 @@ def _make_robot_cfg() -> ArticulationCfg:
         spawn=sim_utils.UrdfFileCfg(
             asset_path=urdf_path,
             usd_dir=usd_dir,
-            usd_file_name=f"{Path(urdf_path).stem}_openpi_imported.usd",
+            usd_file_name=f"{os.path.splitext(os.path.basename(urdf_path))[0]}_imported.usd",
             force_usd_conversion=args_cli.force_usd_conversion,
             make_instanceable=not args_cli.no_instanceable,
             fix_base=True,
@@ -181,6 +193,38 @@ def _spawn_bucket(prefix: str, center: tuple[float, float, float]) -> None:
     _spawn_static_cuboid(f"{prefix}/WallNegY", (outer, wall_t, height), (x, y - outer * 0.5, wall_z), color)
 
 
+def _spawn_teleop_bucket(path: str, pos: tuple[float, float, float]) -> None:
+    bucket_urdf = _asset_path("bucket", "bucket.urdf")
+    if os.path.exists(bucket_urdf):
+        cfg = sim_utils.UrdfFileCfg(
+            asset_path=bucket_urdf,
+            fix_base=True,
+            visual_material=_make_material((0.7, 0.7, 1.0)),
+            joint_drive=UrdfConverterCfg.JointDriveCfg(
+                gains=UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=0.0, damping=0.0),
+                target_type="position",
+                drive_type="force",
+            ),
+        )
+        cfg.func(path, cfg, translation=pos)
+    else:
+        print(f"[BRX] teleop bucket asset not found, using cuboid fallback: {bucket_urdf}")
+        _spawn_bucket(path, (pos[0], pos[1], pos[2]))
+
+
+def _random_block_layout() -> list[tuple[str, tuple[float, float, float], tuple[float, float, float]]]:
+    rng = random.Random(args_cli.block_seed)
+    colors = [(rng.random(), rng.random(), rng.random()), (rng.random(), rng.random(), rng.random())]
+    positions = [
+        (-0.55 + rng.uniform(-0.10, 0.10), rng.uniform(-0.05, 0.05), 2.30),
+        (-0.55 + rng.uniform(-0.10, 0.10), 0.20 + rng.uniform(-0.05, 0.05), 2.30),
+    ]
+    return [
+        ("BlockA", positions[0], colors[0]),
+        ("BlockB", positions[1], colors[1]),
+    ]
+
+
 def _spawn_scene() -> None:
     ground = sim_utils.GroundPlaneCfg(
         color=(0.5, 0.5, 0.5),
@@ -194,9 +238,18 @@ def _spawn_scene() -> None:
         return
     sim_utils.create_prim("/World/TaskScene", "Xform")
     _spawn_static_cuboid("/World/TaskScene/TableTop", (0.8, 0.8, 0.1), (-0.30, 0.0, 2.15), (0.5, 0.5, 0.5))
-    _spawn_bucket("/World/TaskScene/Bucket", (-0.30, 0.0, 2.20))
-    _spawn_rigid_cube("/World/TaskScene/BlockA", 0.05, (-0.55, 0.0, 2.30), (1.0, 0.5, 0.5))
-    _spawn_rigid_cube("/World/TaskScene/BlockB", 0.05, (-0.55, 0.20, 2.30), (0.5, 0.8, 1.0))
+    _spawn_teleop_bucket("/World/TaskScene/Bucket", (-0.30, 0.0, 2.20))
+    cube_size = 0.05
+    if args_cli.randomize_blocks:
+        blocks = _random_block_layout()
+    else:
+        blocks = [
+            ("BlockA", (-0.55, 0.0, 2.30), (1.0, 0.5, 0.5)),
+            ("BlockB", (-0.55, 0.20, 2.30), (1.0, 0.5, 0.5)),
+        ]
+    for name, pos, color in blocks:
+        _spawn_rigid_cube(f"/World/TaskScene/{name}", cube_size, pos, color)
+        print(f"[BRX] spawned {name}: pos={tuple(round(v, 4) for v in pos)}, color={tuple(round(v, 3) for v in color)}")
 
 
 def _make_cameras() -> Camera:
@@ -227,33 +280,41 @@ def _quat_apply(quat: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
     return vec + 2.0 * (q_w * uv + uuv)
 
 
-def _set_fixed_camera_poses(camera: Camera, device: str) -> None:
+def _configure_camera_poses(camera: Camera, device: str) -> None:
     eyes = torch.tensor(
-        [[1.35, -1.15, 1.25], [0.72, 0.82, 0.78], [0.72, -0.82, 0.78]],
+        [
+            [1.35, -1.15, 1.25],
+            [0.72, 0.82, 0.78],
+            [0.72, -0.82, 0.78],
+        ],
         dtype=torch.float32,
         device=device,
     )
     targets = torch.tensor(
-        [[0.70, 0.00, 0.50], [0.64, 0.10, 0.50], [0.64, -0.10, 0.50]],
+        [
+            [0.70, 0.00, 0.50],
+            [0.64, 0.10, 0.50],
+            [0.64, -0.10, 0.50],
+        ],
         dtype=torch.float32,
         device=device,
     )
     camera.set_world_poses_from_view(eyes, targets)
 
 
-def _update_camera_poses(camera: Camera, robot: Articulation, device: str) -> None:
-    if args_cli.camera_pose_mode == "fixed":
-        _set_fixed_camera_poses(camera, device)
-        return
-    body_ids = []
-    for body_name in [args_cli.head_camera_body, args_cli.left_wrist_camera_body, args_cli.right_wrist_camera_body]:
-        if body_name not in robot.body_names:
-            raise RuntimeError(f"Missing camera body: {body_name}")
-        body_ids.append(robot.body_names.index(body_name))
+def _update_camera_poses(
+    camera: Camera,
+    robot: Articulation,
+    head_body_id: int,
+    left_wrist_camera_body_id: int,
+    right_wrist_camera_body_id: int,
+    device: str,
+) -> None:
+    """Keep camera order aligned with custom BRX: left_eye/global, left_wrist, right_wrist."""
+    head_pose = robot.data.body_state_w[0, head_body_id, 0:7]
+    left_pose = robot.data.body_state_w[0, left_wrist_camera_body_id, 0:7]
+    right_pose = robot.data.body_state_w[0, right_wrist_camera_body_id, 0:7]
 
-    head_pose = robot.data.body_state_w[0, body_ids[0], 0:7]
-    left_pose = robot.data.body_state_w[0, body_ids[1], 0:7]
-    right_pose = robot.data.body_state_w[0, body_ids[2], 0:7]
     if args_cli.camera_pose_mode == "link":
         positions = torch.stack([head_pose[0:3], left_pose[0:3], right_pose[0:3]], dim=0)
         orientations = torch.stack([head_pose[3:7], left_pose[3:7], right_pose[3:7]], dim=0)
@@ -315,11 +376,19 @@ def _apply_qpos23(robot: Articulation, row: np.ndarray) -> None:
 
 
 def _apply_default_head_pose(robot: Articulation) -> None:
-    target = robot.data.joint_pos.clone()
-    target[:, robot.joint_names.index("Head02_Joint")] = args_cli.default_head02
-    target[:, robot.joint_names.index("Head03_Joint")] = args_cli.default_head03
-    robot.write_joint_state_to_sim(target, torch.zeros_like(target))
-    robot.set_joint_position_target(target)
+    names = ["Head02_Joint", "Head03_Joint"]
+    if not all(name in robot.joint_names for name in names):
+        missing = [name for name in names if name not in robot.joint_names]
+        raise RuntimeError(f"Missing head joint(s): {missing}")
+    joint_ids = [robot.joint_names.index(name) for name in names]
+    values = torch.tensor([[args_cli.default_head02, args_cli.default_head03]], dtype=torch.float32, device=robot.device)
+
+    joint_pos = robot.data.joint_pos.clone()
+    joint_vel = robot.data.joint_vel.clone()
+    joint_pos[:, joint_ids] = values
+    joint_vel[:, joint_ids] = 0.0
+    robot.write_joint_state_to_sim(joint_pos, joint_vel)
+    robot.set_joint_position_target(values, joint_ids=joint_ids)
 
 
 def _make_observation(robot: Articulation, camera: Camera) -> dict:
@@ -402,19 +471,34 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
     sim_dt = sim.get_physics_dt()
     _validate_robot(robot)
     _apply_default_head_pose(robot)
+    _configure_camera_poses(camera, sim.device)
     robot.write_data_to_sim()
-    for _ in range(max(1, args_cli.warmup_steps)):
-        _update_camera_poses(camera, robot, sim.device)
-        robot.write_data_to_sim()
-        sim.step()
-        robot.update(sim_dt)
-        camera.update(sim_dt)
+    sim.step()
+    robot.update(sim_dt)
+    camera.update(sim_dt)
+
+    if args_cli.head_camera_body not in robot.body_names:
+        raise RuntimeError(f"Missing head camera body: {args_cli.head_camera_body}")
+    head_body_id = robot.body_names.index(args_cli.head_camera_body)
+    if args_cli.left_wrist_camera_body not in robot.body_names:
+        raise RuntimeError(f"Missing left wrist camera body: {args_cli.left_wrist_camera_body}")
+    if args_cli.right_wrist_camera_body not in robot.body_names:
+        raise RuntimeError(f"Missing right wrist camera body: {args_cli.right_wrist_camera_body}")
+    left_wrist_camera_body_id = robot.body_names.index(args_cli.left_wrist_camera_body)
+    right_wrist_camera_body_id = robot.body_names.index(args_cli.right_wrist_camera_body)
+    print(f"[BRX] head camera body: {args_cli.head_camera_body} -> body_index={head_body_id}")
+    print(f"[BRX] left wrist camera body: {args_cli.left_wrist_camera_body} -> body_index={left_wrist_camera_body_id}")
+    print(f"[BRX] right wrist camera body: {args_cli.right_wrist_camera_body} -> body_index={right_wrist_camera_body_id}")
+    _update_camera_poses(camera, robot, head_body_id, left_wrist_camera_body_id, right_wrist_camera_body_id, sim.device)
+    camera_update_every = max(1, args_cli.camera_update_every)
+    camera.update(sim_dt * camera_update_every)
 
     policy = _load_policy() if args_cli.mode == "policy" else None
     replay_actions = _load_replay_actions() if args_cli.mode == "replay_hdf5" else None
     action_queue: list[np.ndarray] = []
     replay_idx = 0
     hold_count = 0
+    step_count = 0
     current_action = _qpos23(robot)
 
     print(f"[BRX openpi] mode={args_cli.mode}, hold_steps={args_cli.command_hold_steps}")
@@ -428,7 +512,7 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
                     current_action = _qpos23(robot)
             elif args_cli.mode == "policy":
                 if not action_queue:
-                    _update_camera_poses(camera, robot, sim.device)
+                    _update_camera_poses(camera, robot, head_body_id, left_wrist_camera_body_id, right_wrist_camera_body_id, sim.device)
                     camera.update(sim_dt)
                     result = policy.infer(_make_observation(robot, camera))
                     action_queue = [np.asarray(row, dtype=np.float32) for row in result["actions"]]
@@ -436,7 +520,7 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
                 current_action = action_queue.pop(0)
             else:
                 if not action_queue:
-                    _update_camera_poses(camera, robot, sim.device)
+                    _update_camera_poses(camera, robot, head_body_id, left_wrist_camera_body_id, right_wrist_camera_body_id, sim.device)
                     camera.update(sim_dt)
                     action_queue = _infer_remote_policy(_make_observation(robot, camera))
                     print(f"[BRX openpi] remote action chunk: {len(action_queue)} x {action_queue[0].shape[0]}")
@@ -444,11 +528,14 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
             hold_count = max(1, args_cli.command_hold_steps)
 
         _apply_qpos23(robot, current_action)
-        _update_camera_poses(camera, robot, sim.device)
+        _update_camera_poses(camera, robot, head_body_id, left_wrist_camera_body_id, right_wrist_camera_body_id, sim.device)
         robot.write_data_to_sim()
         sim.step()
         robot.update(sim_dt)
-        camera.update(sim_dt)
+        step_count += 1
+        if step_count % camera_update_every == 0:
+            _update_camera_poses(camera, robot, head_body_id, left_wrist_camera_body_id, right_wrist_camera_body_id, sim.device)
+            camera.update(sim_dt * camera_update_every)
         hold_count -= 1
 
 
