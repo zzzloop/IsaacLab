@@ -503,6 +503,22 @@ def _lock_non_arm_joints(row: np.ndarray, locked_qpos: np.ndarray) -> np.ndarray
     return safe
 
 
+def _default_locked_qpos23(robot: Articulation) -> np.ndarray:
+    qpos = _qpos23(robot)
+    qpos[[0, 1, 2]] = 0.0
+    qpos[21] = args_cli.default_head02
+    qpos[22] = args_cli.default_head03
+    return qpos
+
+
+def _hold_locked_pose(robot: Articulation, locked_qpos: np.ndarray | None = None) -> None:
+    if locked_qpos is None:
+        robot.set_joint_position_target(robot.data.joint_pos)
+        return
+    target = _joint23_to_full_tensor(robot, _lock_non_arm_joints(_qpos23(robot), locked_qpos))
+    robot.set_joint_position_target(target)
+
+
 def _apply_default_startup_pose(robot: Articulation) -> None:
     names = list(DEFAULT_TORSO_QPOS.keys()) + ["Head02_Joint", "Head03_Joint"]
     if not all(name in robot.joint_names for name in names):
@@ -619,6 +635,7 @@ def _hold_until_policy_start(
     left_wrist_camera_body_id: int,
     right_wrist_camera_body_id: int,
     sim_dt: float,
+    locked_qpos: np.ndarray | None,
 ) -> None:
     if args_cli.mode != "remote_policy" and args_cli.policy_start_delay_s <= 0.0:
         return
@@ -652,7 +669,7 @@ def _hold_until_policy_start(
             _debug_pose_snapshot(robot, "waiting_for_policy")
             last_pose_print = now
 
-        robot.set_joint_position_target(robot.data.joint_pos)
+        _hold_locked_pose(robot, locked_qpos)
         _update_camera_poses(camera, robot, head_body_id, left_wrist_camera_body_id, right_wrist_camera_body_id, sim.device)
         robot.write_data_to_sim()
         sim.step()
@@ -667,8 +684,10 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
     initial_qpos = _load_initial_qpos23()
     if initial_qpos is not None:
         _reset_joint23(robot, initial_qpos)
+        locked_qpos = np.asarray(initial_qpos, dtype=np.float32).copy()
     else:
         _apply_default_startup_pose(robot)
+        locked_qpos = _default_locked_qpos23(robot)
     _debug_pose_snapshot(robot, "after_startup_pose_write")
     _configure_camera_poses(camera, sim.device)
     robot.write_data_to_sim()
@@ -694,7 +713,7 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
     camera_update_every = max(1, args_cli.camera_update_every)
     camera.update(sim_dt * camera_update_every)
     for _ in range(max(1, args_cli.warmup_steps)):
-        robot.set_joint_position_target(robot.data.joint_pos)
+        _hold_locked_pose(robot, locked_qpos)
         _update_camera_poses(camera, robot, head_body_id, left_wrist_camera_body_id, right_wrist_camera_body_id, sim.device)
         robot.write_data_to_sim()
         sim.step()
@@ -709,7 +728,6 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
     hold_count = 0
     step_count = 0
     current_action = _qpos23(robot)
-    locked_qpos = current_action.copy()
     print(
         "[BRX openpi] locked startup fold/trunk/head="
         f"{np.round(locked_qpos[[0, 1, 2, 21, 22]], 4).tolist()} "
@@ -726,6 +744,7 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
         left_wrist_camera_body_id,
         right_wrist_camera_body_id,
         sim_dt,
+        locked_qpos,
     )
     while simulation_app.is_running():
         now = time.monotonic()
