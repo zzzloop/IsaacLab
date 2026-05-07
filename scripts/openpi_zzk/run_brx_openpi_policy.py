@@ -63,6 +63,8 @@ parser.add_argument("--no_task_scene", action="store_true")
 parser.add_argument("--wait_for_start_signal", action="store_true", help="Hold the robot and render until start_signal_file exists.")
 parser.add_argument("--start_signal_file", type=str, default="/tmp/brx_openpi_start")
 parser.add_argument("--policy_start_delay_s", type=float, default=0.0, help="Optional delay before policy/replay starts.")
+parser.add_argument("--unlock_torso", action="store_true", help="Allow policy/replay to command Folding02/Folding03/Trunk. Default locks them upright.")
+parser.add_argument("--unlock_head", action="store_true", help="Allow policy/replay to command Head02/Head03. Default locks head to startup pose.")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -480,6 +482,21 @@ def _print_action_summary(source: str, rows: list[np.ndarray]) -> None:
     )
 
 
+def _lock_non_arm_joints(row: np.ndarray, locked_qpos: np.ndarray) -> np.ndarray:
+    """Keep the robot upright by default.
+
+    BRX tabletop manipulation should not let a small LoRA policy freely command
+    the folding mast/trunk. Head is also fixed to keep the camera distribution
+    stable unless explicitly unlocked.
+    """
+    safe = np.asarray(row, dtype=np.float32).copy()
+    if not args_cli.unlock_torso:
+        safe[[0, 1, 2]] = locked_qpos[[0, 1, 2]]
+    if not args_cli.unlock_head:
+        safe[[21, 22]] = locked_qpos[[21, 22]]
+    return safe
+
+
 def _apply_default_head_pose(robot: Articulation) -> None:
     names = ["Head02_Joint", "Head03_Joint"]
     if not all(name in robot.joint_names for name in names):
@@ -663,6 +680,12 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
     hold_count = 0
     step_count = 0
     current_action = _qpos23(robot)
+    locked_qpos = current_action.copy()
+    print(
+        "[BRX openpi] locked startup fold/trunk/head="
+        f"{np.round(locked_qpos[[0, 1, 2, 21, 22]], 4).tolist()} "
+        f"(unlock_torso={args_cli.unlock_torso}, unlock_head={args_cli.unlock_head})"
+    )
 
     print(f"[BRX openpi] mode={args_cli.mode}, hold_steps={args_cli.command_hold_steps}")
     _hold_until_policy_start(
@@ -701,6 +724,7 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
                 current_action = action_queue.pop(0)
             hold_count = max(1, args_cli.command_hold_steps)
 
+        current_action = _lock_non_arm_joints(current_action, locked_qpos)
         _apply_qpos23(robot, current_action)
         _update_camera_poses(camera, robot, head_body_id, left_wrist_camera_body_id, right_wrist_camera_body_id, sim.device)
         robot.write_data_to_sim()
