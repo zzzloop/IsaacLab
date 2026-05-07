@@ -50,6 +50,9 @@ parser.add_argument("--camera_width", type=int, default=640)
 parser.add_argument("--camera_height", type=int, default=360)
 parser.add_argument("--camera_update_every", type=int, default=1)
 parser.add_argument("--camera_pose_mode", choices=["link", "lookat"], default="link")
+parser.add_argument("--camera_snapshot_dir", type=str, default="/tmp/brx_openpi_camera_snapshots")
+parser.add_argument("--camera_snapshot_interval_s", type=float, default=0.0, help="Save 3-camera PNG snapshots every N seconds after startup. 0 saves startup only.")
+parser.add_argument("--no_camera_snapshot", action="store_true", help="Disable startup camera snapshot saving.")
 parser.add_argument("--default_head02", type=float, default=-0.17918)
 parser.add_argument("--default_head03", type=float, default=-0.81304)
 parser.add_argument("--head_camera_body", type=str, default="EyeL_Link")
@@ -553,6 +556,37 @@ def _make_observation(robot: Articulation, camera: Camera) -> dict:
     }
 
 
+def _save_camera_snapshots(camera: Camera, label: str, step_count: int = 0) -> None:
+    if args_cli.no_camera_snapshot:
+        return
+    from PIL import Image
+
+    out_dir = _abs_path(args_cli.camera_snapshot_dir)
+    os.makedirs(out_dir, exist_ok=True)
+
+    rgb = camera.data.output["rgb"]
+    images = {name: _rgb_to_numpy(rgb[idx]) for idx, name in enumerate(CAMERA_NAMES)}
+    safe_label = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in label)
+    prefix = f"{step_count:06d}_{safe_label}"
+    paths = []
+    for name, image in images.items():
+        path = os.path.join(out_dir, f"{prefix}_{name}.png")
+        Image.fromarray(image).save(path)
+        paths.append(path)
+
+    height = max(image.shape[0] for image in images.values())
+    width = sum(image.shape[1] for image in images.values())
+    contact = Image.new("RGB", (width, height))
+    x_offset = 0
+    for name in CAMERA_NAMES:
+        image = Image.fromarray(images[name])
+        contact.paste(image, (x_offset, 0))
+        x_offset += image.width
+    contact_path = os.path.join(out_dir, f"{prefix}_contact_sheet.png")
+    contact.save(contact_path)
+    print(f"[BRX camera] saved {len(paths)} views + contact sheet: {contact_path}")
+
+
 def _load_replay_actions() -> np.ndarray:
     if not args_cli.action_hdf5:
         raise ValueError("--action_hdf5 is required in replay_hdf5 mode")
@@ -721,6 +755,7 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
         camera.update(sim_dt)
         _render_viewport(sim)
     _debug_pose_snapshot(robot, "after_warmup")
+    _save_camera_snapshots(camera, "after_warmup", 0)
 
     replay_actions = _load_replay_actions() if args_cli.mode == "replay_hdf5" else None
     action_queue: list[np.ndarray] = []
@@ -736,6 +771,7 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
 
     print(f"[BRX openpi] mode={args_cli.mode}, hold_steps={args_cli.command_hold_steps}")
     last_pose_print = time.monotonic()
+    last_camera_snapshot = time.monotonic()
     _hold_until_policy_start(
         sim,
         robot,
@@ -751,6 +787,9 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
         if args_cli.debug_pose_print_s > 0.0 and now - last_pose_print >= args_cli.debug_pose_print_s:
             _debug_pose_snapshot(robot, "run_loop")
             last_pose_print = now
+        if args_cli.camera_snapshot_interval_s > 0.0 and now - last_camera_snapshot >= args_cli.camera_snapshot_interval_s:
+            _save_camera_snapshots(camera, "run_loop", step_count)
+            last_camera_snapshot = now
         if hold_count <= 0:
             if args_cli.mode == "replay_hdf5":
                 if replay_idx < len(replay_actions):
