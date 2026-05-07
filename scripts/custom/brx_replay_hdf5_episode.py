@@ -42,8 +42,8 @@ EXPECTED_JOINT_NAMES = [
     "ArmL06_Joint",
     "ArmL07_Joint",
     "ArmL08_Joint",
-    "JawBlock01_Joint",
-    "JawBlock02_Joint",
+    "JawBlock03_Joint",
+    "JawBlock04_Joint",
     "ArmR02_Joint",
     "ArmR03_Joint",
     "ArmR04_Joint",
@@ -51,8 +51,8 @@ EXPECTED_JOINT_NAMES = [
     "ArmR06_Joint",
     "ArmR07_Joint",
     "ArmR08_Joint",
-    "JawBlock03_Joint",
-    "JawBlock04_Joint",
+    "JawBlock01_Joint",
+    "JawBlock02_Joint",
     "Head02_Joint",
     "Head03_Joint",
 ]
@@ -191,12 +191,12 @@ def joint23_to_ee6d(q: np.ndarray, fk: SimpleURDFFK, config: ReplayConfig) -> np
         left_tf = poses[LEFT_EE_LINK]
         right_tf = poses[RIGHT_EE_LINK]
 
-        # New BRX042501 kinematic chains:
-        #   left EE  LinearclampinggripperJZ02_Link uses JawBlock03/04 -> row[19], row[20]
-        #   right EE LinearclampinggripperJZ01_Link uses JawBlock01/02 -> row[10], row[11]
+        # ACT slots 10/11 are the left gripper and slots 19/20 are the right gripper.
+        # The BRX042501 URDF names are swapped relative to those ACT slot names:
+        # left gripper = JawBlock03/04, right gripper = JawBlock01/02.
         # Keep this identical to datasets/domain_handler/custom_handler.py and brx_control_server.py.
-        left_grip01 = gripper_opening01(row, 19, 20)
-        right_grip01 = gripper_opening01(row, 10, 11)
+        left_grip01 = gripper_opening01(row, 10, 11)
+        right_grip01 = gripper_opening01(row, 19, 20)
         if config.gripper_units == "meters":
             left_grip = left_grip01 * config.gripper_max_m
             right_grip = right_grip01 * config.gripper_max_m
