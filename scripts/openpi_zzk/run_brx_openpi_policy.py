@@ -64,6 +64,9 @@ parser.add_argument("--camera_snapshot_interval_s", type=float, default=0.0, hel
 parser.add_argument("--no_camera_snapshot", action="store_true", help="Disable startup camera snapshot saving.")
 parser.add_argument("--default_head02", type=float, default=-0.17918)
 parser.add_argument("--default_head03", type=float, default=-0.81304)
+parser.add_argument("--startup_arm_qpos_hdf5", type=str, default="/home/kemove/ACT_Datasets/episode_0.hdf5", help="Use arm/gripper qpos from this ACT episode at startup if readable.")
+parser.add_argument("--startup_arm_qpos_frame", type=int, default=0)
+parser.add_argument("--no_startup_arm_qpos_hdf5", action="store_true", help="Disable dataset-based startup arm pose.")
 parser.add_argument("--startup_gripper_open_m", type=float, default=0.041, help="Startup jaw opening target in meters.")
 parser.add_argument("--gripper_max_m", type=float, default=0.041, help="Clamp BRX JawBlock policy targets to [0, gripper_max_m].")
 parser.add_argument("--no_gripper_clamp", action="store_true", help="Send raw policy gripper values without clamping.")
@@ -133,6 +136,7 @@ DEFAULT_TORSO_QPOS = {
     "FoldingModularJoint03_Joint": 0.0,
     "Trunk_Joint": 0.0,
 }
+ARM_AND_GRIPPER_QPOS23_INDICES = list(range(3, 21))
 RIGHT_GRIPPER_JOINTS = ["JawBlock01_Joint", "JawBlock02_Joint"]
 LEFT_GRIPPER_JOINTS = ["JawBlock03_Joint", "JawBlock04_Joint"]
 GRIPPER_JOINT_NAMES = RIGHT_GRIPPER_JOINTS + LEFT_GRIPPER_JOINTS
@@ -465,6 +469,32 @@ def _load_initial_qpos23() -> np.ndarray | None:
     return qpos
 
 
+def _load_startup_arm_qpos23() -> np.ndarray | None:
+    if args_cli.no_startup_arm_qpos_hdf5 or not args_cli.startup_arm_qpos_hdf5:
+        return None
+    path = _abs_path(args_cli.startup_arm_qpos_hdf5)
+    if not os.path.exists(path):
+        print(f"[BRX openpi] startup arm qpos file not found, using URDF arm pose: {path}")
+        return None
+    try:
+        import h5py
+    except ImportError:
+        print("[BRX openpi] h5py unavailable, using URDF arm pose")
+        return None
+
+    with h5py.File(path, "r") as ep:
+        qpos = np.asarray(ep["/observations/qpos"][args_cli.startup_arm_qpos_frame], dtype=np.float32)
+    if qpos.shape[-1] != len(BRX_JOINT_NAMES):
+        raise ValueError(f"Expected startup arm qpos dim {len(BRX_JOINT_NAMES)}, got {qpos.shape} from {path}")
+    print(
+        f"[BRX openpi] startup arms/grippers from {path} frame={args_cli.startup_arm_qpos_frame}: "
+        f"left_arm={np.round(qpos[3:10], 4).tolist()} "
+        f"right_arm={np.round(qpos[12:19], 4).tolist()} "
+        f"dataset_grippers={np.round(qpos[[10, 11, 19, 20]], 4).tolist()}"
+    )
+    return qpos
+
+
 def _print_action_summary(source: str, rows: list[np.ndarray]) -> None:
     if not args_cli.print_action_summary or not rows:
         return
@@ -586,8 +616,6 @@ def _default_locked_qpos23(robot: Articulation) -> np.ndarray:
     qpos[[0, 1, 2]] = 0.0
     qpos[21] = args_cli.default_head02
     qpos[22] = args_cli.default_head03
-    startup_grip = max(0.0, min(args_cli.gripper_max_m, args_cli.startup_gripper_open_m))
-    qpos[GRIPPER_QPOS23_INDICES] = startup_grip
     return qpos
 
 
@@ -599,18 +627,24 @@ def _hold_locked_pose(robot: Articulation, locked_qpos: np.ndarray | None = None
     robot.set_joint_position_target(target)
 
 
-def _apply_default_startup_pose(robot: Articulation) -> None:
-    names = list(DEFAULT_TORSO_QPOS.keys()) + ["Head02_Joint", "Head03_Joint"] + GRIPPER_JOINT_NAMES
+def _apply_default_startup_pose(robot: Articulation, startup_arm_qpos: np.ndarray | None) -> None:
+    qpos = _qpos23(robot)
+    if startup_arm_qpos is not None:
+        qpos[ARM_AND_GRIPPER_QPOS23_INDICES] = np.asarray(startup_arm_qpos, dtype=np.float32)[ARM_AND_GRIPPER_QPOS23_INDICES]
+    else:
+        startup_grip = max(0.0, min(args_cli.gripper_max_m, args_cli.startup_gripper_open_m))
+        qpos[GRIPPER_QPOS23_INDICES] = startup_grip
+    qpos[[0, 1, 2]] = 0.0
+    qpos[21] = args_cli.default_head02
+    qpos[22] = args_cli.default_head03
+    qpos = _sanitize_qpos23(qpos)
+
+    names = BRX_JOINT_NAMES
     if not all(name in robot.joint_names for name in names):
         missing = [name for name in names if name not in robot.joint_names]
         raise RuntimeError(f"Missing startup joint(s): {missing}")
     joint_ids = [robot.joint_names.index(name) for name in names]
-    startup_grip = max(0.0, min(args_cli.gripper_max_m, args_cli.startup_gripper_open_m))
-    values = torch.tensor(
-        [[0.0, 0.0, 0.0, args_cli.default_head02, args_cli.default_head03, startup_grip, startup_grip, startup_grip, startup_grip]],
-        dtype=torch.float32,
-        device=robot.device,
-    )
+    values = torch.tensor([qpos.tolist()], dtype=torch.float32, device=robot.device)
 
     joint_pos = robot.data.joint_pos.clone()
     joint_vel = robot.data.joint_vel.clone()
@@ -619,8 +653,11 @@ def _apply_default_startup_pose(robot: Articulation) -> None:
     robot.write_joint_state_to_sim(joint_pos, joint_vel)
     robot.set_joint_position_target(values, joint_ids=joint_ids)
     print(
-        "[BRX openpi] startup torso/head set only: "
-        f"fold/trunk/head/gripper={np.round(values[0].detach().cpu().numpy(), 4).tolist()}"
+        "[BRX openpi] startup qpos applied: "
+        f"fold/trunk/head={np.round(qpos[[0, 1, 2, 21, 22]], 4).tolist()} "
+        f"left_arm={np.round(qpos[3:10], 4).tolist()} "
+        f"right_arm={np.round(qpos[12:19], 4).tolist()} "
+        f"urdf_grippers={np.round(qpos[[10, 11, 19, 20]], 4).tolist()}"
     )
 
 
@@ -826,7 +863,7 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
         _reset_joint23(robot, initial_qpos)
         locked_qpos = np.asarray(initial_qpos, dtype=np.float32).copy()
     else:
-        _apply_default_startup_pose(robot)
+        _apply_default_startup_pose(robot, _load_startup_arm_qpos23())
         locked_qpos = _default_locked_qpos23(robot)
     _debug_pose_snapshot(robot, "after_startup_pose_write")
     _configure_camera_poses(camera, sim.device)
