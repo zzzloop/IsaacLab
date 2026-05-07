@@ -31,6 +31,8 @@ parser.add_argument("--initial_qpos_hdf5", type=str, default="", help="Optional 
 parser.add_argument("--initial_qpos_frame", type=int, default=0)
 parser.add_argument("--no_initial_qpos_reset", action="store_true", help="Disable explicit --initial_qpos23/--initial_qpos_hdf5 reset.")
 parser.add_argument("--print_action_summary", action="store_true", help="Print fold/trunk/head values for each new action chunk.")
+parser.add_argument("--print_action_table", action="store_true", help="Print full 23D current qpos and first action for each new action chunk.")
+parser.add_argument("--save_policy_actions", type=str, default="", help="Optional .npy path to append/save remote policy action chunks for offline comparison.")
 parser.add_argument("--urdf_path", type=str, default="/home/kemove/zzk_data/IsaacLab/BRX042501/BRX042501_wheel.urdf")
 parser.add_argument("--usd_dir", type=str, default=None)
 parser.add_argument("--force_usd_conversion", action="store_true")
@@ -451,6 +453,35 @@ def _print_action_summary(source: str, rows: list[np.ndarray]) -> None:
     )
 
 
+def _print_action_table(source: str, current_qpos: np.ndarray, rows: list[np.ndarray]) -> None:
+    if not args_cli.print_action_table or not rows:
+        return
+    first = np.asarray(rows[0], dtype=np.float32)
+    delta = first - np.asarray(current_qpos, dtype=np.float32)
+    print(f"[BRX action table] {source} first action vs current qpos")
+    for idx, name in enumerate(BRX_JOINT_NAMES):
+        print(
+            f"  {idx:02d} {name}: "
+            f"qpos={current_qpos[idx]: .5f} action={first[idx]: .5f} delta={delta[idx]: .5f}"
+        )
+    print(
+        "[BRX action table] first chunk range: "
+        f"min={float(np.min(first)):.5f} max={float(np.max(first)):.5f} "
+        f"left_grip={np.round(first[10:12], 5).tolist()} "
+        f"right_grip={np.round(first[19:21], 5).tolist()}"
+    )
+
+
+def _save_policy_action_chunks(chunks: list[np.ndarray], new_rows: list[np.ndarray]) -> list[np.ndarray]:
+    if not args_cli.save_policy_actions or not new_rows:
+        return chunks
+    chunks.extend(np.asarray(row, dtype=np.float32).copy() for row in new_rows)
+    path = _abs_path(args_cli.save_policy_actions)
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    np.save(path, np.stack(chunks, axis=0))
+    return chunks
+
+
 def _debug_pose_snapshot(robot: Articulation, label: str) -> None:
     if args_cli.debug_pose_print_s <= 0.0:
         return
@@ -759,6 +790,7 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
 
     replay_actions = _load_replay_actions() if args_cli.mode == "replay_hdf5" else None
     action_queue: list[np.ndarray] = []
+    saved_policy_actions: list[np.ndarray] = []
     replay_idx = 0
     hold_count = 0
     step_count = 0
@@ -805,9 +837,12 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
                         current_action = _qpos23(robot)
                     else:
                         try:
-                            action_queue = _infer_remote_policy(_make_observation(robot, camera))
+                            obs = _make_observation(robot, camera)
+                            action_queue = _infer_remote_policy(obs)
                             print(f"[BRX openpi] remote action chunk: {len(action_queue)} x {action_queue[0].shape[0]}")
                             _print_action_summary("remote policy", action_queue)
+                            _print_action_table("remote policy", obs["state"], action_queue)
+                            saved_policy_actions = _save_policy_action_chunks(saved_policy_actions, action_queue)
                         except (TimeoutError, urllib.error.URLError, RuntimeError) as exc:
                             print(f"[BRX openpi] remote policy unavailable; holding current pose: {exc}")
                             action_queue = []
