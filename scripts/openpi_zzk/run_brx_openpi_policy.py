@@ -26,6 +26,13 @@ parser.add_argument("--policy_health_url", type=str, default="", help="Defaults 
 parser.add_argument("--policy_request_timeout_s", type=float, default=5.0)
 parser.add_argument("--policy_poll_s", type=float, default=0.5)
 parser.add_argument("--action_hdf5", type=str, default="")
+parser.add_argument("--replay_key", choices=["action", "qpos"], default="action", help="HDF5 dataset to replay in replay_hdf5 mode.")
+parser.add_argument("--replay_start", type=int, default=0)
+parser.add_argument("--replay_end", type=int, default=-1, help="Exclusive end frame. -1 means file end.")
+parser.add_argument("--replay_stride", type=int, default=1)
+parser.add_argument("--replay_loop", action="store_true")
+parser.add_argument("--no_replay_reset_to_first", action="store_true", help="Do not reset robot to the first replay row before playback.")
+parser.add_argument("--replay_apply_locks", action="store_true", help="Apply torso/head locks during replay. Default is raw replay for mapping debug.")
 parser.add_argument("--initial_qpos23", type=float, nargs=23, default=None, help="Explicit 23D startup qpos in BRX order.")
 parser.add_argument("--initial_qpos_hdf5", type=str, default="", help="Optional ACT HDF5 used only when --initial_qpos23 is not provided.")
 parser.add_argument("--initial_qpos_frame", type=int, default=0)
@@ -57,6 +64,9 @@ parser.add_argument("--camera_snapshot_interval_s", type=float, default=0.0, hel
 parser.add_argument("--no_camera_snapshot", action="store_true", help="Disable startup camera snapshot saving.")
 parser.add_argument("--default_head02", type=float, default=-0.17918)
 parser.add_argument("--default_head03", type=float, default=-0.81304)
+parser.add_argument("--startup_gripper_open_m", type=float, default=0.041, help="Startup jaw opening target in meters.")
+parser.add_argument("--gripper_max_m", type=float, default=0.041, help="Clamp BRX JawBlock policy targets to [0, gripper_max_m].")
+parser.add_argument("--no_gripper_clamp", action="store_true", help="Send raw policy gripper values without clamping.")
 parser.add_argument("--head_camera_body", type=str, default="EyeL_Link")
 parser.add_argument("--left_wrist_camera_body", type=str, default="HandCam02_Link")
 parser.add_argument("--right_wrist_camera_body", type=str, default="HandCam01_Link")
@@ -121,6 +131,10 @@ DEFAULT_TORSO_QPOS = {
     "FoldingModularJoint03_Joint": 0.0,
     "Trunk_Joint": 0.0,
 }
+RIGHT_GRIPPER_JOINTS = ["JawBlock01_Joint", "JawBlock02_Joint"]
+LEFT_GRIPPER_JOINTS = ["JawBlock03_Joint", "JawBlock04_Joint"]
+GRIPPER_JOINT_NAMES = RIGHT_GRIPPER_JOINTS + LEFT_GRIPPER_JOINTS
+GRIPPER_QPOS23_INDICES = [BRX_JOINT_NAMES.index(name) for name in GRIPPER_JOINT_NAMES]
 
 
 def _abs_path(path: str) -> str:
@@ -389,6 +403,7 @@ def _qpos23(robot: Articulation) -> np.ndarray:
 def _apply_qpos23(robot: Articulation, row: np.ndarray) -> None:
     if row.shape[-1] != len(BRX_JOINT_NAMES):
         raise ValueError(f"Expected 23D action, got shape {row.shape}")
+    row = _sanitize_qpos23(row)
     target = robot.data.joint_pos.clone()
     for idx, joint_name in enumerate(BRX_JOINT_NAMES):
         target[:, robot.joint_names.index(joint_name)] = float(row[idx])
@@ -398,6 +413,7 @@ def _apply_qpos23(robot: Articulation, row: np.ndarray) -> None:
 def _joint23_to_full_tensor(robot: Articulation, row: np.ndarray) -> torch.Tensor:
     if row.shape[-1] != len(BRX_JOINT_NAMES):
         raise ValueError(f"Expected 23D qpos, got shape {row.shape}")
+    row = _sanitize_qpos23(row)
     target = robot.data.joint_pos.clone()
     for idx, joint_name in enumerate(BRX_JOINT_NAMES):
         target[:, robot.joint_names.index(joint_name)] = float(row[idx])
@@ -453,10 +469,18 @@ def _print_action_summary(source: str, rows: list[np.ndarray]) -> None:
     )
 
 
+def _sanitize_qpos23(row: np.ndarray) -> np.ndarray:
+    safe = np.asarray(row, dtype=np.float32).copy()
+    if not args_cli.no_gripper_clamp:
+        safe[GRIPPER_QPOS23_INDICES] = np.clip(safe[GRIPPER_QPOS23_INDICES], 0.0, args_cli.gripper_max_m)
+    return safe
+
+
 def _print_action_table(source: str, current_qpos: np.ndarray, rows: list[np.ndarray]) -> None:
     if not args_cli.print_action_table or not rows:
         return
-    first = np.asarray(rows[0], dtype=np.float32)
+    raw_first = np.asarray(rows[0], dtype=np.float32)
+    first = _sanitize_qpos23(raw_first)
     delta = first - np.asarray(current_qpos, dtype=np.float32)
     print(f"[BRX action table] {source} first action vs current qpos")
     for idx, name in enumerate(BRX_JOINT_NAMES):
@@ -466,9 +490,12 @@ def _print_action_table(source: str, current_qpos: np.ndarray, rows: list[np.nda
         )
     print(
         "[BRX action table] first chunk range: "
-        f"min={float(np.min(first)):.5f} max={float(np.max(first)):.5f} "
-        f"left_grip={np.round(first[10:12], 5).tolist()} "
-        f"right_grip={np.round(first[19:21], 5).tolist()}"
+        f"raw_min={float(np.min(raw_first)):.5f} raw_max={float(np.max(raw_first)):.5f} "
+        f"applied_min={float(np.min(first)):.5f} applied_max={float(np.max(first)):.5f} "
+        f"right_grip_raw={np.round(raw_first[10:12], 5).tolist()} "
+        f"left_grip_raw={np.round(raw_first[19:21], 5).tolist()} "
+        f"right_grip_applied={np.round(first[10:12], 5).tolist()} "
+        f"left_grip_applied={np.round(first[19:21], 5).tolist()}"
     )
 
 
@@ -542,6 +569,8 @@ def _default_locked_qpos23(robot: Articulation) -> np.ndarray:
     qpos[[0, 1, 2]] = 0.0
     qpos[21] = args_cli.default_head02
     qpos[22] = args_cli.default_head03
+    startup_grip = max(0.0, min(args_cli.gripper_max_m, args_cli.startup_gripper_open_m))
+    qpos[GRIPPER_QPOS23_INDICES] = startup_grip
     return qpos
 
 
@@ -554,13 +583,14 @@ def _hold_locked_pose(robot: Articulation, locked_qpos: np.ndarray | None = None
 
 
 def _apply_default_startup_pose(robot: Articulation) -> None:
-    names = list(DEFAULT_TORSO_QPOS.keys()) + ["Head02_Joint", "Head03_Joint"]
+    names = list(DEFAULT_TORSO_QPOS.keys()) + ["Head02_Joint", "Head03_Joint"] + GRIPPER_JOINT_NAMES
     if not all(name in robot.joint_names for name in names):
         missing = [name for name in names if name not in robot.joint_names]
         raise RuntimeError(f"Missing startup joint(s): {missing}")
     joint_ids = [robot.joint_names.index(name) for name in names]
+    startup_grip = max(0.0, min(args_cli.gripper_max_m, args_cli.startup_gripper_open_m))
     values = torch.tensor(
-        [[0.0, 0.0, 0.0, args_cli.default_head02, args_cli.default_head03]],
+        [[0.0, 0.0, 0.0, args_cli.default_head02, args_cli.default_head03, startup_grip, startup_grip, startup_grip, startup_grip]],
         dtype=torch.float32,
         device=robot.device,
     )
@@ -573,7 +603,7 @@ def _apply_default_startup_pose(robot: Articulation) -> None:
     robot.set_joint_position_target(values, joint_ids=joint_ids)
     print(
         "[BRX openpi] startup torso/head set only: "
-        f"fold/trunk/head={np.round(values[0].detach().cpu().numpy(), 4).tolist()}"
+        f"fold/trunk/head/gripper={np.round(values[0].detach().cpu().numpy(), 4).tolist()}"
     )
 
 
@@ -618,16 +648,34 @@ def _save_camera_snapshots(camera: Camera, label: str, step_count: int = 0) -> N
     print(f"[BRX camera] saved {len(paths)} views + contact sheet: {contact_path}")
 
 
-def _load_replay_actions() -> np.ndarray:
+def _load_replay_rows() -> np.ndarray:
     if not args_cli.action_hdf5:
         raise ValueError("--action_hdf5 is required in replay_hdf5 mode")
     import h5py
 
+    dataset_path = "/action" if args_cli.replay_key == "action" else "/observations/qpos"
     with h5py.File(_abs_path(args_cli.action_hdf5), "r") as ep:
-        actions = np.asarray(ep["/action"][:], dtype=np.float32)
-    if actions.ndim != 2 or actions.shape[1] != len(BRX_JOINT_NAMES):
-        raise ValueError(f"Expected replay actions shape [T, 23], got {actions.shape}")
-    return actions
+        if dataset_path not in ep:
+            raise KeyError(f"Replay dataset not found in {args_cli.action_hdf5}: {dataset_path}")
+        rows = np.asarray(ep[dataset_path][:], dtype=np.float32)
+    if rows.ndim != 2 or rows.shape[1] != len(BRX_JOINT_NAMES):
+        raise ValueError(f"Expected replay rows shape [T, 23], got {rows.shape} from {dataset_path}")
+
+    start = max(0, args_cli.replay_start)
+    end = len(rows) if args_cli.replay_end < 0 else min(len(rows), args_cli.replay_end)
+    stride = max(1, args_cli.replay_stride)
+    rows = rows[start:end:stride]
+    if len(rows) == 0:
+        raise ValueError(f"Replay slice is empty: start={start}, end={end}, stride={stride}")
+    print(
+        f"[BRX replay] loaded {len(rows)} rows from {args_cli.action_hdf5}:{dataset_path} "
+        f"slice=[{start}:{end}:{stride}]"
+    )
+    print(
+        "[BRX replay] first row fold/trunk/head/gripper="
+        f"{np.round(rows[0][[0, 1, 2, 21, 22, 10, 11, 19, 20]], 5).tolist()}"
+    )
+    return rows
 
 
 def _infer_remote_policy(observation: dict) -> list[np.ndarray]:
@@ -746,7 +794,11 @@ def _hold_until_policy_start(
 def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -> None:
     sim_dt = sim.get_physics_dt()
     _validate_robot(robot)
+    replay_rows = _load_replay_rows() if args_cli.mode == "replay_hdf5" else None
     initial_qpos = _load_initial_qpos23()
+    if args_cli.mode == "replay_hdf5" and initial_qpos is None and not args_cli.no_replay_reset_to_first:
+        initial_qpos = np.asarray(replay_rows[0], dtype=np.float32)
+        print("[BRX replay] resetting robot to first replay row before playback")
     if initial_qpos is not None:
         _reset_joint23(robot, initial_qpos)
         locked_qpos = np.asarray(initial_qpos, dtype=np.float32).copy()
@@ -788,7 +840,6 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
     _debug_pose_snapshot(robot, "after_warmup")
     _save_camera_snapshots(camera, "after_warmup", 0)
 
-    replay_actions = _load_replay_actions() if args_cli.mode == "replay_hdf5" else None
     action_queue: list[np.ndarray] = []
     saved_policy_actions: list[np.ndarray] = []
     replay_idx = 0
@@ -824,8 +875,15 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
             last_camera_snapshot = now
         if hold_count <= 0:
             if args_cli.mode == "replay_hdf5":
-                if replay_idx < len(replay_actions):
-                    current_action = replay_actions[replay_idx]
+                if replay_idx < len(replay_rows):
+                    current_action = replay_rows[replay_idx]
+                    if replay_idx == 0 or (args_cli.print_action_table and replay_idx % 30 == 0):
+                        _print_action_table(f"replay {args_cli.replay_key} frame={replay_idx}", _qpos23(robot), [current_action])
+                    replay_idx += 1
+                elif args_cli.replay_loop:
+                    replay_idx = 0
+                    current_action = replay_rows[replay_idx]
+                    print("[BRX replay] loop restart")
                     replay_idx += 1
                 else:
                     current_action = _qpos23(robot)
@@ -851,7 +909,8 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
                     current_action = action_queue.pop(0)
             hold_count = max(1, args_cli.command_hold_steps)
 
-        current_action = _lock_non_arm_joints(current_action, locked_qpos)
+        if args_cli.mode == "remote_policy" or args_cli.replay_apply_locks:
+            current_action = _lock_non_arm_joints(current_action, locked_qpos)
         _apply_qpos23(robot, current_action)
         _update_camera_poses(camera, robot, head_body_id, left_wrist_camera_body_id, right_wrist_camera_body_id, sim.device)
         robot.write_data_to_sim()

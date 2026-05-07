@@ -33,13 +33,25 @@ CUDA_VISIBLE_DEVICES=2 XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run examples/brx/br
   --default-prompt "grab the small blocks pick them up and put them in the bucket"
 ```
 
-Replay recorded HDF5 actions without loading openpi:
+Replay recorded HDF5 rows without loading openpi. Use this first to separate
+mapping/simulation problems from policy-training problems. Raw replay does not
+lock torso/head unless `--replay_apply_locks` is passed.
 
 ```bash
+cd /home/kemove/zzk_data/IsaacLab
 ./isaaclab.sh -p scripts/openpi_zzk/run_brx_openpi_policy.py \
+  --headless \
+  --livestream 2 \
+  --enable_cameras \
+  --device cuda:0 \
   --mode replay_hdf5 \
   --action_hdf5 /home/kemove/ACT_Datasets/episode_0.hdf5 \
-  --urdf_path /home/kemove/zzk_data/IsaacLab/BRX042501/BRX042501_wheel.urdf
+  --replay_key action \
+  --command_hold_steps 1 \
+  --urdf_path /home/kemove/zzk_data/IsaacLab/BRX042501/BRX042501_wheel.urdf \
+  --camera_pose_mode link \
+  --print_action_table
 ```
 
+Use `--replay_key qpos` to replay `/observations/qpos` instead of `/action`.
 Both modes command 23D absolute qpos in the BRX order used by `openpi.policies.brx_policy.BRX_JOINT_NAMES`.
