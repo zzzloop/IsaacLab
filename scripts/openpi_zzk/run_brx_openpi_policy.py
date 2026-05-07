@@ -27,6 +27,11 @@ parser.add_argument("--checkpoint_dir", type=str, default="")
 parser.add_argument("--policy_server_url", type=str, default="http://127.0.0.1:8777/infer")
 parser.add_argument("--prompt", type=str, default="move the object smoothly")
 parser.add_argument("--action_hdf5", type=str, default="")
+parser.add_argument("--initial_qpos23", type=float, nargs=23, default=None, help="Explicit 23D startup qpos in BRX order.")
+parser.add_argument("--initial_qpos_hdf5", type=str, default="", help="Optional ACT HDF5 used only when --initial_qpos23 is not provided.")
+parser.add_argument("--initial_qpos_frame", type=int, default=0)
+parser.add_argument("--no_initial_qpos_reset", action="store_true")
+parser.add_argument("--print_action_summary", action="store_true", help="Print fold/trunk/head values for each new action chunk.")
 parser.add_argument("--urdf_path", type=str, default="/home/kemove/zzk_data/IsaacLab/BRX042501/BRX042501_wheel.urdf")
 parser.add_argument("--usd_dir", type=str, default=None)
 parser.add_argument("--force_usd_conversion", action="store_true")
@@ -105,6 +110,39 @@ BRX_JOINT_NAMES = [
 ]
 
 CAMERA_NAMES = ["left_eye", "left_wrist", "right_wrist"]
+
+# Built-in BRX startup pose. This is used unless explicitly overridden by
+# --initial_qpos23, --initial_qpos_hdf5, or --no_initial_qpos_reset.
+# Order is BRX_JOINT_NAMES: upright folded mast, arms slightly raised/forward,
+# grippers open, head pitched down toward the table.
+DEFAULT_INITIAL_QPOS23 = np.asarray(
+    [
+        -1.05,  # FoldingModularJoint02_Joint
+        1.35,  # FoldingModularJoint03_Joint
+        0.0,  # Trunk_Joint
+        0.35,  # ArmL02_Joint
+        -0.35,  # ArmL03_Joint
+        0.0,  # ArmL04_Joint
+        0.75,  # ArmL05_Joint
+        0.0,  # ArmL06_Joint
+        0.15,  # ArmL07_Joint
+        0.0,  # ArmL08_Joint
+        0.035,  # JawBlock01_Joint
+        0.035,  # JawBlock02_Joint
+        0.35,  # ArmR02_Joint
+        0.35,  # ArmR03_Joint
+        0.0,  # ArmR04_Joint
+        -0.75,  # ArmR05_Joint
+        0.0,  # ArmR06_Joint
+        -0.15,  # ArmR07_Joint
+        0.0,  # ArmR08_Joint
+        0.035,  # JawBlock03_Joint
+        0.035,  # JawBlock04_Joint
+        -0.17918,  # Head02_Joint
+        -0.81304,  # Head03_Joint
+    ],
+    dtype=np.float32,
+)
 
 
 def _abs_path(path: str) -> str:
@@ -379,6 +417,68 @@ def _apply_qpos23(robot: Articulation, row: np.ndarray) -> None:
     robot.set_joint_position_target(target)
 
 
+def _joint23_to_full_tensor(robot: Articulation, row: np.ndarray) -> torch.Tensor:
+    if row.shape[-1] != len(BRX_JOINT_NAMES):
+        raise ValueError(f"Expected 23D qpos, got shape {row.shape}")
+    target = robot.data.joint_pos.clone()
+    for idx, joint_name in enumerate(BRX_JOINT_NAMES):
+        target[:, robot.joint_names.index(joint_name)] = float(row[idx])
+    return target
+
+
+def _reset_joint23(robot: Articulation, row: np.ndarray) -> None:
+    target = _joint23_to_full_tensor(robot, np.asarray(row, dtype=np.float32))
+    joint_vel = torch.zeros_like(target)
+    robot.write_joint_state_to_sim(target, joint_vel)
+    robot.set_joint_position_target(target)
+    robot.reset()
+
+
+def _load_initial_qpos23() -> np.ndarray | None:
+    if args_cli.no_initial_qpos_reset:
+        return None
+    if args_cli.initial_qpos23 is not None:
+        qpos = np.asarray(args_cli.initial_qpos23, dtype=np.float32)
+        print(f"[BRX openpi] initial qpos reset from --initial_qpos23: fold/trunk/head={np.round(qpos[[0, 1, 2, 21, 22]], 4).tolist()}")
+        return qpos
+    if not args_cli.initial_qpos_hdf5:
+        qpos = DEFAULT_INITIAL_QPOS23.copy()
+        qpos[21] = args_cli.default_head02
+        qpos[22] = args_cli.default_head03
+        print(f"[BRX openpi] initial qpos reset from built-in upright preset: fold/trunk/head={np.round(qpos[[0, 1, 2, 21, 22]], 4).tolist()}")
+        return qpos
+    path = _abs_path(args_cli.initial_qpos_hdf5)
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"Initial qpos HDF5 not found: {path}. "
+            "Pass --initial_qpos23, pass --initial_qpos_hdf5 to a valid ACT episode, or use --no_initial_qpos_reset."
+        )
+    try:
+        import h5py
+    except ImportError as exc:
+        raise ImportError("h5py is required for --initial_qpos_hdf5 reset inside Isaac Lab.") from exc
+
+    with h5py.File(path, "r") as ep:
+        qpos = np.asarray(ep["/observations/qpos"][args_cli.initial_qpos_frame], dtype=np.float32)
+    if qpos.shape[-1] != len(BRX_JOINT_NAMES):
+        raise ValueError(f"Expected initial qpos dim {len(BRX_JOINT_NAMES)}, got {qpos.shape} from {path}")
+    print(
+        f"[BRX openpi] initial qpos reset from {path} frame={args_cli.initial_qpos_frame}: "
+        f"fold/trunk/head={np.round(qpos[[0, 1, 2, 21, 22]], 4).tolist()}"
+    )
+    return qpos
+
+
+def _print_action_summary(source: str, rows: list[np.ndarray]) -> None:
+    if not args_cli.print_action_summary or not rows:
+        return
+    row = np.asarray(rows[0], dtype=np.float32)
+    print(
+        f"[BRX openpi] {source} first action fold/trunk/head="
+        f"{np.round(row[[0, 1, 2, 21, 22]], 4).tolist()}"
+    )
+
+
 def _apply_default_head_pose(robot: Articulation) -> None:
     names = ["Head02_Joint", "Head03_Joint"]
     if not all(name in robot.joint_names for name in names):
@@ -519,7 +619,11 @@ def _hold_until_policy_start(
 def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -> None:
     sim_dt = sim.get_physics_dt()
     _validate_robot(robot)
-    _apply_default_head_pose(robot)
+    initial_qpos = _load_initial_qpos23()
+    if initial_qpos is not None:
+        _reset_joint23(robot, initial_qpos)
+    else:
+        _apply_default_head_pose(robot)
     _configure_camera_poses(camera, sim.device)
     robot.write_data_to_sim()
     sim.step()
@@ -584,6 +688,7 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
                     result = policy.infer(_make_observation(robot, camera))
                     action_queue = [np.asarray(row, dtype=np.float32) for row in result["actions"]]
                     print(f"[BRX openpi] inferred action chunk: {len(action_queue)} x {action_queue[0].shape[0]}")
+                    _print_action_summary("local policy", action_queue)
                 current_action = action_queue.pop(0)
             else:
                 if not action_queue:
@@ -591,6 +696,7 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
                     camera.update(sim_dt)
                     action_queue = _infer_remote_policy(_make_observation(robot, camera))
                     print(f"[BRX openpi] remote action chunk: {len(action_queue)} x {action_queue[0].shape[0]}")
+                    _print_action_summary("remote policy", action_queue)
                 current_action = action_queue.pop(0)
             hold_count = max(1, args_cli.command_hold_steps)
 
