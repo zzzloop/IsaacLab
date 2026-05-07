@@ -13,6 +13,7 @@ import random
 import time
 import urllib.error
 import urllib.request
+import glob
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
@@ -40,6 +41,11 @@ parser.add_argument("--no_initial_qpos_reset", action="store_true", help="Disabl
 parser.add_argument("--print_action_summary", action="store_true", help="Print fold/trunk/head values for each new action chunk.")
 parser.add_argument("--print_action_table", action="store_true", help="Print full 23D current qpos and first action for each new action chunk.")
 parser.add_argument("--save_policy_actions", type=str, default="", help="Optional .npy path to append/save remote policy action chunks for offline comparison.")
+parser.add_argument("--action_bounds_dir", type=str, default="/home/kemove/ACT_Datasets", help="ACT HDF5 directory used to clamp remote policy actions to training range.")
+parser.add_argument("--action_bounds_pattern", type=str, default="episode_*.hdf5")
+parser.add_argument("--action_bounds_margin", type=float, default=0.03, help="Per-joint radians/meters margin around dataset action min/max.")
+parser.add_argument("--no_action_bounds", action="store_true", help="Disable dataset action min/max guard for remote policy.")
+parser.add_argument("--max_policy_delta", type=float, default=0.12, help="Clamp each remote policy target to current qpos +/- this value. Use <=0 to disable.")
 parser.add_argument("--urdf_path", type=str, default="/home/kemove/zzk_data/IsaacLab/BRX042501/BRX042501_wheel.urdf")
 parser.add_argument("--usd_dir", type=str, default=None)
 parser.add_argument("--force_usd_conversion", action="store_true")
@@ -556,6 +562,79 @@ def _save_policy_action_chunks(chunks: list[np.ndarray], new_rows: list[np.ndarr
     return chunks
 
 
+def _load_action_bounds() -> tuple[np.ndarray, np.ndarray] | None:
+    if args_cli.no_action_bounds or args_cli.mode != "remote_policy":
+        return None
+    root = _abs_path(args_cli.action_bounds_dir)
+    paths = sorted(glob.glob(os.path.join(root, args_cli.action_bounds_pattern)))
+    if not paths:
+        print(f"[BRX guard] no action bounds files found under {root}; guard disabled")
+        return None
+    try:
+        import h5py
+    except ImportError:
+        print("[BRX guard] h5py unavailable; action bounds guard disabled")
+        return None
+
+    mins = []
+    maxs = []
+    for path in paths:
+        with h5py.File(path, "r") as ep:
+            if "/action" not in ep:
+                continue
+            actions = np.asarray(ep["/action"][:], dtype=np.float32)
+        if actions.ndim != 2 or actions.shape[1] != len(BRX_JOINT_NAMES):
+            print(f"[BRX guard] skipping action bounds file with shape {actions.shape}: {path}")
+            continue
+        actions = np.asarray([_sanitize_qpos23(row, clamp_gripper=False) for row in actions], dtype=np.float32)
+        mins.append(np.min(actions, axis=0))
+        maxs.append(np.max(actions, axis=0))
+    if not mins:
+        print("[BRX guard] no valid action datasets found; guard disabled")
+        return None
+
+    lo = np.min(np.stack(mins, axis=0), axis=0) - args_cli.action_bounds_margin
+    hi = np.max(np.stack(maxs, axis=0), axis=0) + args_cli.action_bounds_margin
+    lo[GRIPPER_QPOS23_INDICES] = np.maximum(0.0, lo[GRIPPER_QPOS23_INDICES])
+    hi[GRIPPER_QPOS23_INDICES] = np.minimum(args_cli.gripper_max_m, hi[GRIPPER_QPOS23_INDICES])
+    print(f"[BRX guard] loaded action bounds from {len(paths)} files, margin={args_cli.action_bounds_margin}")
+    for idx, name in enumerate(BRX_JOINT_NAMES):
+        print(f"  {idx:02d} {name}: [{lo[idx]: .4f}, {hi[idx]: .4f}]")
+    return lo.astype(np.float32), hi.astype(np.float32)
+
+
+def _guard_policy_actions(
+    rows: list[np.ndarray],
+    current_qpos: np.ndarray,
+    action_bounds: tuple[np.ndarray, np.ndarray] | None,
+) -> list[np.ndarray]:
+    if not rows:
+        return rows
+    guarded = []
+    for row in rows:
+        raw = _sanitize_qpos23(row)
+        clipped = raw.copy()
+        changed = np.zeros_like(clipped, dtype=bool)
+        if action_bounds is not None:
+            lo, hi = action_bounds
+            before = clipped.copy()
+            clipped = np.clip(clipped, lo, hi)
+            changed |= np.abs(clipped - before) > 1e-6
+        if args_cli.max_policy_delta > 0.0:
+            before = clipped.copy()
+            clipped = np.clip(
+                clipped,
+                np.asarray(current_qpos, dtype=np.float32) - args_cli.max_policy_delta,
+                np.asarray(current_qpos, dtype=np.float32) + args_cli.max_policy_delta,
+            )
+            changed |= np.abs(clipped - before) > 1e-6
+        if np.any(changed):
+            names = [BRX_JOINT_NAMES[idx] for idx in np.nonzero(changed)[0].tolist()]
+            print(f"[BRX guard] clipped policy action joints: {names}")
+        guarded.append(clipped.astype(np.float32))
+    return guarded
+
+
 def _debug_pose_snapshot(robot: Articulation, label: str) -> None:
     if args_cli.debug_pose_print_s <= 0.0:
         return
@@ -902,6 +981,7 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
 
     action_queue: list[np.ndarray] = []
     saved_policy_actions: list[np.ndarray] = []
+    action_bounds = _load_action_bounds()
     replay_idx = 0
     hold_count = 0
     step_count = 0
@@ -957,6 +1037,7 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
                         try:
                             obs = _make_observation(robot, camera)
                             action_queue = _infer_remote_policy(obs)
+                            action_queue = _guard_policy_actions(action_queue, obs["state"], action_bounds)
                             print(f"[BRX openpi] remote action chunk: {len(action_queue)} x {action_queue[0].shape[0]}")
                             _print_action_summary("remote policy", action_queue)
                             _print_action_table("remote policy", obs["state"], action_queue)
