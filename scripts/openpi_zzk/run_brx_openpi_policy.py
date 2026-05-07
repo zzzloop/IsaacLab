@@ -10,8 +10,8 @@ import json
 import os
 from pathlib import Path
 import random
-import sys
 import time
+import urllib.error
 import urllib.request
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
@@ -20,12 +20,11 @@ from isaaclab.app import AppLauncher
 
 
 parser = argparse.ArgumentParser(description="BRX042501 openpi policy runner for Isaac Lab.")
-parser.add_argument("--mode", choices=["remote_policy", "policy", "replay_hdf5"], default="remote_policy")
-parser.add_argument("--openpi_root", type=str, default="/home/kemove/openpi_zzk")
-parser.add_argument("--config_name", type=str, default="pi05_brx_finetune")
-parser.add_argument("--checkpoint_dir", type=str, default="")
+parser.add_argument("--mode", choices=["remote_policy", "replay_hdf5"], default="remote_policy")
 parser.add_argument("--policy_server_url", type=str, default="http://127.0.0.1:8777/infer")
-parser.add_argument("--prompt", type=str, default="move the object smoothly")
+parser.add_argument("--policy_health_url", type=str, default="", help="Defaults to policy_server_url with /health.")
+parser.add_argument("--policy_request_timeout_s", type=float, default=5.0)
+parser.add_argument("--policy_poll_s", type=float, default=0.5)
 parser.add_argument("--action_hdf5", type=str, default="")
 parser.add_argument("--initial_qpos23", type=float, nargs=23, default=None, help="Explicit 23D startup qpos in BRX order.")
 parser.add_argument("--initial_qpos_hdf5", type=str, default="", help="Optional ACT HDF5 used only when --initial_qpos23 is not provided.")
@@ -60,8 +59,6 @@ parser.add_argument("--head_camera_offset", type=float, nargs=3, default=(0.0, 0
 parser.add_argument("--head_camera_forward", type=float, nargs=3, default=(0.25, 0.0, 0.0))
 parser.add_argument("--wrist_camera_forward", type=float, nargs=3, default=(0.20, 0.0, -0.12))
 parser.add_argument("--no_task_scene", action="store_true")
-parser.add_argument("--wait_for_start_signal", action="store_true", help="Hold the robot and render until start_signal_file exists.")
-parser.add_argument("--start_signal_file", type=str, default="/tmp/brx_openpi_start")
 parser.add_argument("--policy_start_delay_s", type=float, default=0.0, help="Optional delay before policy/replay starts.")
 parser.add_argument("--unlock_torso", action="store_true", help="Allow policy/replay to command Folding02/Folding03/Trunk. Default locks them upright.")
 parser.add_argument("--unlock_head", action="store_true", help="Allow policy/replay to command Head02/Head03. Default locks head to startup pose.")
@@ -520,28 +517,7 @@ def _make_observation(robot: Articulation, camera: Camera) -> dict:
     return {
         "state": _qpos23(robot),
         "images": images,
-        "prompt": args_cli.prompt,
     }
-
-
-def _load_policy():
-    if not args_cli.checkpoint_dir:
-        raise ValueError("--checkpoint_dir is required in policy mode")
-    openpi_root = _abs_path(args_cli.openpi_root)
-    openpi_src = str(Path(openpi_root) / "src")
-    for path in [openpi_src, openpi_root]:
-        if path not in sys.path:
-            sys.path.insert(0, path)
-    if not (Path(openpi_src) / "openpi").exists() and not (Path(openpi_root) / "openpi").exists():
-        raise ModuleNotFoundError(
-            f"Cannot find openpi package under --openpi_root={openpi_root}. "
-            f"Expected either {openpi_src}/openpi or {openpi_root}/openpi."
-        )
-    from openpi.policies import policy_config
-    from openpi.training import config as _config
-
-    train_config = _config.get_config(args_cli.config_name)
-    return policy_config.create_trained_policy(train_config, _abs_path(args_cli.checkpoint_dir))
 
 
 def _load_replay_actions() -> np.ndarray:
@@ -565,7 +541,6 @@ def _infer_remote_policy(observation: dict) -> list[np.ndarray]:
             "left_wrist": _png_b64(images["left_wrist"]),
             "right_wrist": _png_b64(images["right_wrist"]),
         },
-        "prompt": observation.get("prompt") or args_cli.prompt,
     }
     request = urllib.request.Request(
         args_cli.policy_server_url,
@@ -573,11 +548,32 @@ def _infer_remote_policy(observation: dict) -> list[np.ndarray]:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=120.0) as response:
+    with urllib.request.urlopen(request, timeout=args_cli.policy_request_timeout_s) as response:
         result = json.loads(response.read().decode("utf-8"))
     if not result.get("ok", False):
         raise RuntimeError(f"Remote policy error: {result}")
     return [np.asarray(row, dtype=np.float32) for row in result["actions"]]
+
+
+def _policy_health_url() -> str:
+    if args_cli.policy_health_url:
+        return args_cli.policy_health_url
+    infer_url = args_cli.policy_server_url.rstrip("/")
+    if infer_url.endswith("/infer"):
+        return f"{infer_url[:-len('/infer')]}/health"
+    return f"{infer_url}/health"
+
+
+def _policy_server_ready(timeout_s: float = 0.3) -> bool:
+    request = urllib.request.Request(_policy_health_url(), method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_s) as response:
+            if response.status != 200:
+                return False
+            payload = json.loads(response.read().decode("utf-8"))
+            return bool(payload.get("ok", False))
+    except (TimeoutError, urllib.error.URLError, json.JSONDecodeError):
+        return False
 
 
 def _validate_robot(robot: Articulation) -> None:
@@ -607,23 +603,33 @@ def _hold_until_policy_start(
     right_wrist_camera_body_id: int,
     sim_dt: float,
 ) -> None:
-    if args_cli.policy_start_delay_s <= 0.0 and not args_cli.wait_for_start_signal:
+    if args_cli.mode != "remote_policy" and args_cli.policy_start_delay_s <= 0.0:
         return
 
     start_time = time.monotonic()
-    signal_file = _abs_path(args_cli.start_signal_file)
-    if args_cli.wait_for_start_signal:
-        print(f"[BRX openpi] waiting for start signal file: {signal_file}")
-        print(f"[BRX openpi] after WebRTC connects, run: touch {signal_file}")
+    last_wait_print = 0.0
+    last_policy_poll = 0.0
+    policy_ready = False
+    if args_cli.mode == "remote_policy":
+        print(f"[BRX openpi] waiting for policy server health: {_policy_health_url()}")
     if args_cli.policy_start_delay_s > 0.0:
         print(f"[BRX openpi] delaying policy start for {args_cli.policy_start_delay_s:.1f}s")
 
     while simulation_app.is_running():
+        now = time.monotonic()
+        if args_cli.mode == "remote_policy" and now - last_policy_poll >= max(0.1, args_cli.policy_poll_s):
+            policy_ready = _policy_server_ready(timeout_s=min(0.2, args_cli.policy_request_timeout_s))
+            last_policy_poll = now
+
         delay_done = time.monotonic() - start_time >= args_cli.policy_start_delay_s
-        signal_done = (not args_cli.wait_for_start_signal) or os.path.exists(signal_file)
-        if delay_done and signal_done:
-            print("[BRX openpi] policy/replay start released")
+        policy_done = args_cli.mode != "remote_policy" or policy_ready
+        if delay_done and policy_done:
+            print("[BRX openpi] policy server ready; starting actions")
             return
+
+        if args_cli.mode == "remote_policy" and now - last_wait_print >= 2.0:
+            print("[BRX openpi] sim is rendering; policy server not ready yet")
+            last_wait_print = now
 
         robot.set_joint_position_target(robot.data.joint_pos)
         _update_camera_poses(camera, robot, head_body_id, left_wrist_camera_body_id, right_wrist_camera_body_id, sim.device)
@@ -673,7 +679,6 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
         camera.update(sim_dt)
         _render_viewport(sim)
 
-    policy = _load_policy() if args_cli.mode == "policy" else None
     replay_actions = _load_replay_actions() if args_cli.mode == "replay_hdf5" else None
     action_queue: list[np.ndarray] = []
     replay_idx = 0
@@ -705,23 +710,23 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
                     replay_idx += 1
                 else:
                     current_action = _qpos23(robot)
-            elif args_cli.mode == "policy":
-                if not action_queue:
-                    _update_camera_poses(camera, robot, head_body_id, left_wrist_camera_body_id, right_wrist_camera_body_id, sim.device)
-                    camera.update(sim_dt)
-                    result = policy.infer(_make_observation(robot, camera))
-                    action_queue = [np.asarray(row, dtype=np.float32) for row in result["actions"]]
-                    print(f"[BRX openpi] inferred action chunk: {len(action_queue)} x {action_queue[0].shape[0]}")
-                    _print_action_summary("local policy", action_queue)
-                current_action = action_queue.pop(0)
             else:
                 if not action_queue:
                     _update_camera_poses(camera, robot, head_body_id, left_wrist_camera_body_id, right_wrist_camera_body_id, sim.device)
                     camera.update(sim_dt)
-                    action_queue = _infer_remote_policy(_make_observation(robot, camera))
-                    print(f"[BRX openpi] remote action chunk: {len(action_queue)} x {action_queue[0].shape[0]}")
-                    _print_action_summary("remote policy", action_queue)
-                current_action = action_queue.pop(0)
+                    if not _policy_server_ready():
+                        current_action = _qpos23(robot)
+                    else:
+                        try:
+                            action_queue = _infer_remote_policy(_make_observation(robot, camera))
+                            print(f"[BRX openpi] remote action chunk: {len(action_queue)} x {action_queue[0].shape[0]}")
+                            _print_action_summary("remote policy", action_queue)
+                        except (TimeoutError, urllib.error.URLError, RuntimeError) as exc:
+                            print(f"[BRX openpi] remote policy unavailable; holding current pose: {exc}")
+                            action_queue = []
+                            current_action = _qpos23(robot)
+                if action_queue:
+                    current_action = action_queue.pop(0)
             hold_count = max(1, args_cli.command_hold_steps)
 
         current_action = _lock_non_arm_joints(current_action, locked_qpos)
