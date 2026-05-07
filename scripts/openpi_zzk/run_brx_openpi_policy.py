@@ -67,6 +67,7 @@ parser.add_argument("--default_head03", type=float, default=-0.81304)
 parser.add_argument("--startup_gripper_open_m", type=float, default=0.041, help="Startup jaw opening target in meters.")
 parser.add_argument("--gripper_max_m", type=float, default=0.041, help="Clamp BRX JawBlock policy targets to [0, gripper_max_m].")
 parser.add_argument("--no_gripper_clamp", action="store_true", help="Send raw policy gripper values without clamping.")
+parser.add_argument("--swap_left_right_gripper", action="store_true", help="Swap JawBlock01/02 with JawBlock03/04 for replay/policy debugging.")
 parser.add_argument("--head_camera_body", type=str, default="EyeL_Link")
 parser.add_argument("--left_wrist_camera_body", type=str, default="HandCam02_Link")
 parser.add_argument("--right_wrist_camera_body", type=str, default="HandCam01_Link")
@@ -469,9 +470,16 @@ def _print_action_summary(source: str, rows: list[np.ndarray]) -> None:
     )
 
 
-def _sanitize_qpos23(row: np.ndarray) -> np.ndarray:
+def _sanitize_qpos23(row: np.ndarray, clamp_gripper: bool | None = None) -> np.ndarray:
     safe = np.asarray(row, dtype=np.float32).copy()
-    if not args_cli.no_gripper_clamp:
+    if args_cli.swap_left_right_gripper:
+        right = safe[[10, 11]].copy()
+        left = safe[[19, 20]].copy()
+        safe[[10, 11]] = left
+        safe[[19, 20]] = right
+    if clamp_gripper is None:
+        clamp_gripper = args_cli.mode == "remote_policy" and not args_cli.no_gripper_clamp
+    if clamp_gripper:
         safe[GRIPPER_QPOS23_INDICES] = np.clip(safe[GRIPPER_QPOS23_INDICES], 0.0, args_cli.gripper_max_m)
     return safe
 
@@ -674,6 +682,12 @@ def _load_replay_rows() -> np.ndarray:
     print(
         "[BRX replay] first row fold/trunk/head/gripper="
         f"{np.round(rows[0][[0, 1, 2, 21, 22, 10, 11, 19, 20]], 5).tolist()}"
+    )
+    print(
+        "[BRX replay] gripper raw range "
+        f"JawBlock01/02={np.round([np.min(rows[:, 10:12]), np.max(rows[:, 10:12])], 5).tolist()} "
+        f"JawBlock03/04={np.round([np.min(rows[:, 19:21]), np.max(rows[:, 19:21])], 5).tolist()} "
+        f"swap_left_right_gripper={args_cli.swap_left_right_gripper}"
     )
     return rows
 
