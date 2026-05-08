@@ -79,6 +79,11 @@ parser.add_argument("--gripper_min", type=float, default=0.0)
 parser.add_argument("--gripper_max", type=float, default=0.041)
 parser.add_argument("--normalized_gripper", action="store_true", default=True, help="Map model gripper outputs from opening [0, 1] to jaw opening meters before sending to BRX.")
 parser.add_argument("--raw_gripper", dest="normalized_gripper", action="store_false", help="Use model gripper outputs as jaw opening meters directly.")
+parser.add_argument("--invert_gripper", action="store_true", help="Interpret model gripper output as closedness instead of opening: sent_opening=(1-output)*gripper_max.")
+parser.add_argument("--swap_grippers", action="store_true", help="Swap model left/right gripper channels before sending. Diagnostic only.")
+parser.add_argument("--gripper_gamma", type=float, default=1.0, help="Sharpen normalized opening before scaling. >1 makes small openings close more decisively.")
+parser.add_argument("--force_left_gripper_m", type=float, default=None, help="Override left gripper command in meters after model inference.")
+parser.add_argument("--force_right_gripper_m", type=float, default=None, help="Override right gripper command in meters after model inference.")
 parser.add_argument("--reject_unsafe", action="store_true", help="Reject chunks that required safety clipping instead of sending clipped commands.")
 parser.add_argument("--unsafe_report_rows", type=int, default=5, help="Rows to print from safety diagnostics.")
 args = parser.parse_args()
@@ -205,14 +210,30 @@ def _apply_safety_filter(action: np.ndarray, state: dict[str, Any]) -> tuple[np.
     issues.extend(left_issues)
     issues.extend(right_issues)
 
+    if args.swap_grippers:
+        safe[:, [9, 19]] = safe[:, [19, 9]]
+        issues.append("gripper diagnostic: swapped left/right gripper channels before scaling")
+
     for grip_idx, side in [(9, "left_gripper"), (19, "right_gripper")]:
         raw = safe[:, grip_idx].copy()
         if args.normalized_gripper:
-            safe[:, grip_idx] = safe[:, grip_idx] * args.gripper_max
+            norm = np.clip(safe[:, grip_idx], 0.0, 1.0)
+            if args.invert_gripper:
+                norm = 1.0 - norm
+            if args.gripper_gamma != 1.0:
+                norm = np.power(norm, max(args.gripper_gamma, 1e-6))
+            safe[:, grip_idx] = norm * args.gripper_max
         safe[:, grip_idx] = np.clip(safe[:, grip_idx], args.gripper_min, args.gripper_max)
         changed = np.where(np.abs(raw - safe[:, grip_idx]) > 1e-6)[0]
         for row_idx in changed.tolist():
             issues.append(f"{side}[{row_idx}] raw={raw[row_idx]:.4f} safe={safe[row_idx, grip_idx]:.4f}")
+
+    if args.force_left_gripper_m is not None:
+        safe[:, 9] = np.clip(float(args.force_left_gripper_m), args.gripper_min, args.gripper_max)
+        issues.append(f"gripper diagnostic: forced left gripper to {safe[0, 9]:.4f} m")
+    if args.force_right_gripper_m is not None:
+        safe[:, 19] = np.clip(float(args.force_right_gripper_m), args.gripper_min, args.gripper_max)
+        issues.append(f"gripper diagnostic: forced right gripper to {safe[0, 19]:.4f} m")
 
     return safe, issues
 
