@@ -12,7 +12,8 @@ Expected data:
 
 EE6D order:
   [left_xyz, left_rot6d, left_gripper, right_xyz, right_rot6d, right_gripper]
-where gripper is converted to jaw meters by default before sending to Isaac Lab.
+where gripper is converted to jaw target meters by default before sending to Isaac Lab.
+For BRX042501, 0.0 is open and about 0.041 is closed.
 """
 
 from __future__ import annotations

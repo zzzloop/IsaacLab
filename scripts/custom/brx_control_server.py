@@ -62,6 +62,18 @@ parser.add_argument("--joint_stiffness", type=float, default=2500.0, help="Posit
 parser.add_argument("--joint_damping", type=float, default=120.0, help="Position drive damping for all imported robot joints.")
 parser.add_argument("--effort_limit", type=float, default=800.0, help="Implicit actuator effort limit.")
 parser.add_argument("--velocity_limit", type=float, default=60.0, help="Implicit actuator velocity limit.")
+parser.add_argument(
+    "--gripper_close_m",
+    type=float,
+    default=0.041,
+    help="Jaw joint target that corresponds to closed gripper in Isaac Lab control diagnostics.",
+)
+parser.add_argument(
+    "--gripper_open_m",
+    type=float,
+    default=0.0,
+    help="Jaw joint target that corresponds to open gripper in Isaac Lab control diagnostics.",
+)
 parser.add_argument("--no_task_scene", action="store_true")
 parser.add_argument("--fixed_blocks", dest="randomize_blocks", action="store_false", help="Disable startup randomization for block colors and positions.")
 parser.add_argument("--block_seed", type=int, default=None, help="Optional seed for repeatable randomized block placement.")
@@ -497,6 +509,20 @@ class ControlHandler(BaseHTTPRequestHandler):
             elif self.path == "/command/stop":
                 version = COMMAND_BUFFER.set_command("stop", [])
                 self._send_json(200, {"ok": True, "mode": "stop", "version": version})
+            elif self.path == "/command/gripper":
+                left = payload.get("left", None)
+                right = payload.get("right", None)
+                state = COMMAND_BUFFER.get_state()
+                if "ee6d_base" not in state:
+                    raise ValueError("BRX state is not ready")
+                row = list(state["ee6d_base"])
+                if left is not None:
+                    row[9] = float(left)
+                if right is not None:
+                    row[19] = float(right)
+                rows = [row for _ in range(int(payload.get("rows", 30)))]
+                version = COMMAND_BUFFER.set_command("ee6d", rows)
+                self._send_json(200, {"ok": True, "mode": "ee6d", "rows": len(rows), "version": version, "left": row[9], "right": row[19]})
             else:
                 self._send_json(404, {"error": "unknown endpoint"})
         except Exception as exc:
@@ -898,12 +924,17 @@ def _state_snapshot(robot: Articulation, left_ctx: ArmIkContext, right_ctx: ArmI
 
     right_grip = 0.0
     left_grip = 0.0
+    gripper_joints: dict[str, float] = {}
     if all(name in robot.joint_names for name in RIGHT_GRIPPER_JOINTS):
         right_ids = [robot.joint_names.index(name) for name in RIGHT_GRIPPER_JOINTS]
         right_grip = float(torch.mean(torch.abs(joint_pos[right_ids])).detach().cpu())
+        for name, jid in zip(RIGHT_GRIPPER_JOINTS, right_ids):
+            gripper_joints[name] = float(joint_pos[jid].detach().cpu())
     if all(name in robot.joint_names for name in LEFT_GRIPPER_JOINTS):
         left_ids = [robot.joint_names.index(name) for name in LEFT_GRIPPER_JOINTS]
         left_grip = float(torch.mean(torch.abs(joint_pos[left_ids])).detach().cpu())
+        for name, jid in zip(LEFT_GRIPPER_JOINTS, left_ids):
+            gripper_joints[name] = float(joint_pos[jid].detach().cpu())
 
     left_ee10_base = left_pos_b[0].detach().cpu().tolist() + _quat_to_rot6d(left_quat_b[0]) + [left_grip]
     right_ee10_base = right_pos_b[0].detach().cpu().tolist() + _quat_to_rot6d(right_quat_b[0]) + [right_grip]
@@ -917,6 +948,8 @@ def _state_snapshot(robot: Articulation, left_ctx: ArmIkContext, right_ctx: ArmI
         "right_ee_base": right_ee10_base,
         "left_ee_world": left_pose_w.detach().cpu().tolist(),
         "right_ee_world": right_pose_w.detach().cpu().tolist(),
+        "gripper_joints": gripper_joints,
+        "gripper_convention": {"open_m": args_cli.gripper_open_m, "close_m": args_cli.gripper_close_m},
     }
     state.update(COMMAND_BUFFER.command_status())
     return state
@@ -957,7 +990,8 @@ def run_simulator(sim: SimulationContext, robot: Articulation, camera: Camera) -
     print("[BRX] Control conventions:")
     print("[BRX] ee6d: [left_xyz, left_rot6d, left_gripper, right_xyz, right_rot6d, right_gripper], absolute base frame")
     print("[BRX] joint23: absolute joint targets in EXPECTED_MOVABLE_JOINTS order")
-    print("[BRX] gripper scalar is interpreted as jaw meters and clamped to [0, 0.041]")
+    print("[BRX] gripper scalar is interpreted as jaw joint target meters and clamped to [0, 0.041]")
+    print(f"[BRX] gripper diagnostic convention: open_m={args_cli.gripper_open_m:.4f}, close_m={args_cli.gripper_close_m:.4f}")
     print(f"[BRX] default head joints: Head02={args_cli.default_head02:.5f}, Head03={args_cli.default_head03:.5f}")
     COMMAND_BUFFER.set_state(_state_snapshot(robot, left_ctx, right_ctx))
     openxr_teleop = OpenXRTeleop() if args_cli.enable_openxr_teleop else None
